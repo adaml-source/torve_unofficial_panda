@@ -1,0 +1,26 @@
+services:
+  panda:
+    build: .
+    image: torve-panda:latest
+    container_name: panda
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7000:7000"
+    environment:
+      PORT: 7000
+      PANDA_DB_PATH: /app/.data/panda.db
+      # PANDA_SECRET must be set in the .env file next to this compose file.
+      # Generate with: openssl rand -hex 32
+      PANDA_SECRET: ${PANDA_SECRET:?PANDA_SECRET is required — set in .env}
+    volumes:
+      - panda-data:/app/.data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:7000/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  panda-data:
+    driver: local
