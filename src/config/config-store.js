@@ -1,62 +1,66 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(__dirname, "..", "..", ".data");
-const STORE_FILE = path.join(DATA_DIR, "configs.json");
+const DB_PATH = process.env.PANDA_DB_PATH || path.join(DATA_DIR, "panda.db");
+
+let db = null;
 
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
 
-async function readStore() {
-  await ensureDataDir();
+function getDb() {
+  if (db) return db;
 
-  try {
-    const raw = await fs.readFile(STORE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && parsed.configs && typeof parsed.configs === "object") {
-      return parsed;
-    }
-  } catch {
-    // Fall through to the empty store.
-  }
-
-  return {
-    version: 1,
-    configs: {}
-  };
-}
-
-async function writeStore(store) {
-  await ensureDataDir();
-  const tempFile = `${STORE_FILE}.tmp`;
-  await fs.writeFile(tempFile, JSON.stringify(store, null, 2), "utf8");
-  await fs.rename(tempFile, STORE_FILE);
+  db = new DatabaseSync(DB_PATH);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS configs (
+      id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      config_json TEXT NOT NULL
+    )
+  `);
+  return db;
 }
 
 export async function saveConfig(config) {
-  const store = await readStore();
+  await ensureDataDir();
+
+  const database = getDb();
   const id = crypto.randomBytes(12).toString("hex");
   const timestamp = new Date().toISOString();
 
-  store.configs[id] = {
-    id,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    config
-  };
+  database
+    .prepare("INSERT INTO configs (id, created_at, updated_at, config_json) VALUES (?, ?, ?, ?)")
+    .run(id, timestamp, timestamp, JSON.stringify(config));
 
-  await writeStore(store);
-  return store.configs[id];
+  return { id, createdAt: timestamp, updatedAt: timestamp, config };
 }
 
 export async function getConfigRecord(configId) {
-  const store = await readStore();
-  return store.configs[configId] || null;
+  await ensureDataDir();
+
+  const database = getDb();
+  const row = database
+    .prepare("SELECT id, created_at, updated_at, config_json FROM configs WHERE id = ?")
+    .get(configId);
+
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    config: JSON.parse(row.config_json),
+  };
 }
 
 export function redactConfigSecrets(config) {
@@ -67,6 +71,6 @@ export function redactConfigSecrets(config) {
   return {
     ...config,
     debridApiKey: config.debridApiKey ? "[redacted]" : "",
-    putioClientId: config.putioClientId ? "[redacted]" : ""
+    putioClientId: config.putioClientId ? "[redacted]" : "",
   };
 }
