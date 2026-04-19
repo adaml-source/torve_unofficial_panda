@@ -73,6 +73,10 @@ export function redactConfigSecrets(config) {
     debridApiKey: config.debridApiKey ? "[redacted]" : "",
     debridCredentialCiphertext: config.debridCredentialCiphertext ? "[redacted]" : "",
     putioClientId: config.putioClientId ? "[redacted]" : "",
+    usenetPassword: config.usenetPassword ? "[redacted]" : "",
+    nzbIndexerApiKey: config.nzbIndexerApiKey ? "[redacted]" : "",
+    downloadClientPassword: config.downloadClientPassword ? "[redacted]" : "",
+    downloadClientApiKey: config.downloadClientApiKey ? "[redacted]" : "",
   };
 }
 

@@ -34,6 +34,10 @@ export const RELEASE_LANGUAGES = [
 export const SORT_OPTIONS = ["quality", "qualitysize", "seeders", "size"];
 export const RESULT_LIMITS = ["5", "10", "15", "20"];
 
+export const USENET_PROVIDERS = ["none", "easynews", "generic"];
+export const NZB_INDEXERS = ["none", "nzbgeek", "scenenzbs", "dognzb", "nzbplanet", "custom"];
+export const DOWNLOAD_CLIENTS = ["none", "nzbget", "sabnzbd"];
+
 const DEFAULT_PROVIDER_IDS = [
   "yts",
   "eztv",
@@ -42,6 +46,12 @@ const DEFAULT_PROVIDER_IDS = [
   "torrentgalaxy",
   "nyaasi"
 ];
+
+function sanitizeInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
 
 export function createDefaultConfig() {
   return {
@@ -61,7 +71,24 @@ export function createDefaultConfig() {
     allowUncached: false,
     maxResults: "10",
     hideDownloadLinks: true,
-    hideCatalog: true
+    hideCatalog: true,
+    // Usenet
+    enableUsenet: false,
+    usenetProvider: "none",
+    usenetHost: "",
+    usenetPort: 563,
+    usenetUsername: "",
+    usenetPassword: "",
+    usenetSSL: true,
+    usenetConnections: 10,
+    nzbIndexer: "none",
+    nzbIndexerUrl: "",
+    nzbIndexerApiKey: "",
+    downloadClient: "none",
+    downloadClientUrl: "",
+    downloadClientUsername: "",
+    downloadClientPassword: "",
+    downloadClientApiKey: "",
   };
 }
 
@@ -76,6 +103,10 @@ function sanitizeStringArray(values, allowedValues) {
 
 function sanitizeBoolean(value, fallback) {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function sanitizeString(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 export function sanitizeConfig(input, knownProviders) {
@@ -98,11 +129,11 @@ export function sanitizeConfig(input, knownProviders) {
     debridService: DEBRID_SERVICES.includes(input?.debridService)
       ? input.debridService
       : defaults.debridService,
-    debridApiKey: typeof input?.debridApiKey === "string" ? input.debridApiKey.trim() : "",
+    debridApiKey: sanitizeString(input?.debridApiKey),
     debridCredentialCiphertext: typeof input?.debridCredentialCiphertext === "string" ? input.debridCredentialCiphertext : "",
     debridCredentialSource: typeof input?.debridCredentialSource === "string" ? input.debridCredentialSource : "",
-    debridDisplayIdentifier: typeof input?.debridDisplayIdentifier === "string" ? input.debridDisplayIdentifier.trim() : "",
-    putioClientId: typeof input?.putioClientId === "string" ? input.putioClientId.trim() : "",
+    debridDisplayIdentifier: sanitizeString(input?.debridDisplayIdentifier),
+    putioClientId: sanitizeString(input?.putioClientId),
     groupByQuality: sanitizeBoolean(input?.groupByQuality, defaults.groupByQuality),
     sortTorrentsBy: SORT_OPTIONS.includes(input?.sortTorrentsBy)
       ? input.sortTorrentsBy
@@ -112,6 +143,29 @@ export function sanitizeConfig(input, knownProviders) {
       ? String(input.maxResults)
       : defaults.maxResults,
     hideDownloadLinks: sanitizeBoolean(input?.hideDownloadLinks, defaults.hideDownloadLinks),
-    hideCatalog: sanitizeBoolean(input?.hideCatalog, defaults.hideCatalog)
+    hideCatalog: sanitizeBoolean(input?.hideCatalog, defaults.hideCatalog),
+    // Usenet
+    enableUsenet: sanitizeBoolean(input?.enableUsenet, defaults.enableUsenet),
+    usenetProvider: USENET_PROVIDERS.includes(input?.usenetProvider)
+      ? input.usenetProvider
+      : defaults.usenetProvider,
+    usenetHost: sanitizeString(input?.usenetHost),
+    usenetPort: sanitizeInt(input?.usenetPort, 1, 65535, defaults.usenetPort),
+    usenetUsername: sanitizeString(input?.usenetUsername),
+    usenetPassword: sanitizeString(input?.usenetPassword),
+    usenetSSL: sanitizeBoolean(input?.usenetSSL, defaults.usenetSSL),
+    usenetConnections: sanitizeInt(input?.usenetConnections, 1, 50, defaults.usenetConnections),
+    nzbIndexer: NZB_INDEXERS.includes(input?.nzbIndexer)
+      ? input.nzbIndexer
+      : defaults.nzbIndexer,
+    nzbIndexerUrl: sanitizeString(input?.nzbIndexerUrl),
+    nzbIndexerApiKey: sanitizeString(input?.nzbIndexerApiKey),
+    downloadClient: DOWNLOAD_CLIENTS.includes(input?.downloadClient)
+      ? input.downloadClient
+      : defaults.downloadClient,
+    downloadClientUrl: sanitizeString(input?.downloadClientUrl),
+    downloadClientUsername: sanitizeString(input?.downloadClientUsername),
+    downloadClientPassword: sanitizeString(input?.downloadClientPassword),
+    downloadClientApiKey: sanitizeString(input?.downloadClientApiKey),
   };
 }
