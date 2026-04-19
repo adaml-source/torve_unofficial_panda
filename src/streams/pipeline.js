@@ -4,7 +4,8 @@ import { fetchUsenetStreams } from "../providers/usenet-adapter.js";
 export async function buildStreams({
   config,
   mediaType,
-  mediaId
+  mediaId,
+  proxyBaseUrl,
 }) {
   const sources = [];
 
@@ -16,7 +17,7 @@ export async function buildStreams({
 
   if (config.enableUsenet) {
     sources.push(
-      fetchUsenetStreams(config, mediaType, mediaId)
+      fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl)
         .then((streams) => ({ source: "usenet", streams }))
         .catch((err) => ({ source: "usenet", streams: [], error: err.message }))
     );

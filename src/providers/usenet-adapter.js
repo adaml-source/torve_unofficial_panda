@@ -41,7 +41,7 @@ function formatFileSize(bytes) {
 
 // ── Easynews ──
 
-async function searchEasynews(config, mediaType, mediaId) {
+async function searchEasynews(config, mediaType, mediaId, baseUrl) {
   if (!config.usenetUsername || !config.usenetPassword) return [];
 
   const { imdbId, season, episode } = parseMediaId(mediaId);
@@ -84,7 +84,9 @@ async function searchEasynews(config, mediaType, mediaId) {
       .filter((item) => item.rawSize > 0 && item.sig1)
       .slice(0, 15)
       .map((item) => {
-        const streamUrl = `https://${config.usenetUsername}:${config.usenetPassword}@members.easynews.com/dl/${item.sig1}/${encodeURIComponent(item.fileName)}`;
+        const streamUrl = baseUrl
+          ? `${baseUrl}/easynews/${item.sig1}/${encodeURIComponent(item.fileName)}`
+          : `https://${config.usenetUsername}:${config.usenetPassword}@members.easynews.com/dl/${item.sig1}/${encodeURIComponent(item.fileName)}`;
         const size = formatFileSize(item.rawSize);
         const codec = item.codec || "";
         const titleParts = [item.fileName, size, codec].filter(Boolean);
@@ -168,14 +170,14 @@ async function searchNewznab(config, mediaType, mediaId) {
 
 // ── Public API ──
 
-export async function fetchUsenetStreams(config, mediaType, mediaId) {
+export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl) {
   if (!config.enableUsenet) return [];
 
   const sources = [];
 
   if (config.usenetProvider === "easynews") {
     sources.push(
-      searchEasynews(config, mediaType, mediaId).catch((err) => {
+      searchEasynews(config, mediaType, mediaId, proxyBaseUrl).catch((err) => {
         console.error(`Easynews adapter error: ${err.message}`);
         return [];
       }),

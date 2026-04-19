@@ -64,7 +64,7 @@ function createManifest(baseUrl, config, token) {
     version: "0.2.0",
     name: `Panda (${nameSuffix})`,
     description: "Torve guided streaming addon with server-side debrid storage and Torrentio-backed source orchestration.",
-    logo: `${baseUrl}/logo.svg`,
+    logo: `${baseUrl}/logo.png`,
     background: `${baseUrl}/logo.svg`,
     resources: ["stream"],
     types: ["movie", "series"],
@@ -191,6 +191,24 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/logo.png") {
+      const logoPath = new URL("../ui/panda-logo.png", import.meta.url);
+      try {
+        const fs = await import("node:fs");
+        const data = fs.readFileSync(logoPath);
+        response.writeHead(200, {
+          "content-type": "image/png",
+          "content-length": data.length,
+          "cache-control": "public, max-age=86400",
+        });
+        response.end(data);
+      } catch {
+        response.writeHead(404);
+        response.end();
+      }
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/logo.svg") {
       sendSvg(
         response,
@@ -273,9 +291,48 @@ const server = http.createServer(async (request, response) => {
       const result = await buildStreams({
         config: record.config,
         mediaType,
-        mediaId
+        mediaId,
+        proxyBaseUrl: `${baseUrl}/u/${token}`,
       });
       sendJson(response, 200, { streams: result.streams });
+      return;
+    }
+
+    // Easynews proxy — streams content through Panda so the client doesn't need embedded auth
+    const easynewsMatch = url.pathname.match(/^\/u\/([^/]+)\/easynews\/([^/]+)\/(.+)$/);
+    if (request.method === "GET" && easynewsMatch) {
+      const [, token, hash, filename] = easynewsMatch;
+      const record = await getStoredConfigOrNull(token);
+      if (!record || record.config.usenetProvider !== "easynews") {
+        sendJson(response, 404, { error: "config_not_found" });
+        return;
+      }
+
+      const { usenetUsername, usenetPassword } = record.config;
+      const easynewsUrl = `https://members.easynews.com/dl/${hash}/${filename}`;
+      const auth = Buffer.from(`${usenetUsername}:${usenetPassword}`).toString("base64");
+
+      try {
+        const upstream = await fetch(easynewsUrl, {
+          headers: { Authorization: `Basic ${auth}` },
+          redirect: "follow",
+        });
+
+        if (!upstream.ok) {
+          sendJson(response, upstream.status, { error: "easynews_upstream_error" });
+          return;
+        }
+
+        response.writeHead(upstream.status, {
+          "content-type": upstream.headers.get("content-type") || "application/octet-stream",
+          "content-length": upstream.headers.get("content-length") || "",
+          "accept-ranges": upstream.headers.get("accept-ranges") || "none",
+          "cache-control": "no-store",
+        });
+        upstream.body.pipe(response);
+      } catch (err) {
+        sendJson(response, 502, { error: "easynews_proxy_error", message: err.message });
+      }
       return;
     }
 
