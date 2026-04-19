@@ -4,12 +4,15 @@ import { decodeConfigToken, encodeConfigToken } from "./config/config-token.js";
 import {
   createDefaultConfig,
   DEBRID_SERVICES,
+  DOWNLOAD_CLIENTS,
+  NZB_INDEXERS,
   QUALITY_OPTIONS,
   QUALITY_PROFILES,
   RELEASE_LANGUAGES,
   RESULT_LIMITS,
   sanitizeConfig,
-  SORT_OPTIONS
+  SORT_OPTIONS,
+  USENET_PROVIDERS
 } from "./config/schema.js";
 import { getConfigRecord, redactConfigSecrets, saveConfig } from "./config/config-store.js";
 import { getProviderRegistry } from "./providers/provider-registry.js";
@@ -65,7 +68,7 @@ function createManifest(baseUrl, config, token) {
     name: `Panda (${nameSuffix})`,
     description: "Torve guided streaming addon with server-side debrid storage and Torrentio-backed source orchestration.",
     logo: `${baseUrl}/logo.png`,
-    background: `${baseUrl}/logo.svg`,
+    background: `${baseUrl}/logo.png`,
     resources: ["stream"],
     types: ["movie", "series"],
     idPrefixes: ["tt"],
@@ -104,37 +107,74 @@ function renderHome(baseUrl) {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Panda</title>
+    <title>Panda - Torve</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
+      :root {
+        color-scheme: dark;
+        --bg: #08080e;
+        --bg-card: #111118;
+        --line: rgba(255,255,255,.1);
+        --text: #e4e4e7;
+        --text-strong: #ffffff;
+        --muted: #71717a;
+        --accent: #c8a44e;
+        --radius: 10px;
+      }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
-        font-family: "Segoe UI", system-ui, sans-serif;
-        background: #0d1117;
-        color: #e6edf3;
+        font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
       }
-      main {
-        max-width: 760px;
-        margin: 0 auto;
-        padding: 40px 20px;
+      .site-header {
+        background: rgba(8,8,14,.85);
+        border-bottom: 1px solid var(--line);
       }
-      a { color: #ffb74d; }
-      code {
-        background: #161b22;
-        padding: 2px 6px;
-        border-radius: 6px;
+      .site-header-inner {
+        max-width: 1140px; margin: 0 auto;
+        padding: 14px 20px;
+        display: flex; align-items: center; gap: 20px;
       }
+      .brand { font-weight: 700; color: var(--text-strong); text-decoration: none; }
+      main { max-width: 760px; margin: 0 auto; padding: 40px 20px; }
+      h1 { font-size: 36px; font-weight: 700; color: var(--text-strong); letter-spacing: -.02em; margin: 0 0 8px; }
+      p { color: var(--muted); line-height: 1.6; }
+      .card { background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 24px; margin-top: 20px; }
+      ul { list-style: none; padding: 0; margin: 0; }
+      li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+      li:last-child { border-bottom: none; }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      code { background: var(--bg); border: 1px solid var(--line); padding: 2px 6px; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color: var(--text-strong); }
     </style>
   </head>
   <body>
+    <header class="site-header">
+      <div class="site-header-inner">
+        <a href="https://torve.app" class="brand">Torve / Panda</a>
+      </div>
+    </header>
     <main>
-      <h1>Panda</h1>
-      <p>Panda is the Torve guided streaming addon service.</p>
-      <ul>
-        <li><a href="/configure">Guided setup</a></li>
-        <li><a href="/manifest.json">Base manifest</a></li>
-        <li><a href="/healthz">Health</a></li>
-      </ul>
-      <p>Base URL: <code>${baseUrl}</code></p>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px">
+        <img src="/logo.png" alt="Panda" style="width:72px;height:72px;border-radius:14px;flex-shrink:0">
+        <h1 style="margin:0">Panda</h1>
+      </div>
+      <p>Panda is the Torve guided streaming addon service. Pick your sources, enter your credentials once, and Panda returns a single manifest URL you can install in Torve.</p>
+      <div class="card">
+        <ul>
+          <li><a href="/configure">→ Guided setup</a></li>
+          <li><a href="https://torve.app/app/extensions.html">← Back to Torve extensions</a></li>
+          <li><a href="/manifest.json">Base manifest</a></li>
+          <li><a href="/healthz">Service health</a></li>
+        </ul>
+      </div>
+      <p style="margin-top:20px;font-size:12px">Base URL: <code>${baseUrl}</code></p>
     </main>
   </body>
 </html>`;
@@ -192,7 +232,26 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/logo.png") {
-      const logoPath = new URL("../ui/panda-logo.png", import.meta.url);
+      const logoPath = new URL("./ui/panda-logo.png", import.meta.url);
+      try {
+        const fs = await import("node:fs");
+        const data = fs.readFileSync(logoPath);
+        response.writeHead(200, {
+          "content-type": "image/png",
+          "content-length": data.length,
+          "cache-control": "public, max-age=86400",
+        });
+        response.end(data);
+      } catch {
+        response.writeHead(404);
+        response.end();
+      }
+      return;
+    }
+
+    // Favicon → use the same panda PNG
+    if (request.method === "GET" && (url.pathname === "/favicon.ico" || url.pathname === "/favicon.png")) {
+      const logoPath = new URL("./ui/panda-logo.png", import.meta.url);
       try {
         const fs = await import("node:fs");
         const data = fs.readFileSync(logoPath);
@@ -247,7 +306,10 @@ const server = http.createServer(async (request, response) => {
           debridServices: DEBRID_SERVICES,
           releaseLanguages: RELEASE_LANGUAGES,
           sortOptions: SORT_OPTIONS,
-          resultLimits: RESULT_LIMITS
+          resultLimits: RESULT_LIMITS,
+          usenetProviders: USENET_PROVIDERS,
+          nzbIndexers: NZB_INDEXERS,
+          downloadClients: DOWNLOAD_CLIENTS
         })
       );
       return;
