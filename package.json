@@ -1,0 +1,15 @@
+{
+  "name": "torve-unofficial-panda",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Panda is a first-party Torve addon service for guided streaming setup and advanced source configuration.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+
