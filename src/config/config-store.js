@@ -71,6 +71,33 @@ export function redactConfigSecrets(config) {
   return {
     ...config,
     debridApiKey: config.debridApiKey ? "[redacted]" : "",
+    debridCredentialCiphertext: config.debridCredentialCiphertext ? "[redacted]" : "",
     putioClientId: config.putioClientId ? "[redacted]" : "",
   };
+}
+
+/**
+ * Update an existing config record by id. Used by /api/v1/configs/me PATCH.
+ */
+export async function updateConfig(configId, nextConfig) {
+  await ensureDataDir();
+  const database = getDb();
+  const timestamp = new Date().toISOString();
+  const result = database
+    .prepare("UPDATE configs SET config_json = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(nextConfig), timestamp, configId);
+  if (result.changes === 0) return null;
+  return { id: configId, updatedAt: timestamp, config: nextConfig };
+}
+
+/**
+ * Delete a config record by id. Used by /api/v1/configs/me DELETE.
+ */
+export async function deleteConfig(configId) {
+  await ensureDataDir();
+  const database = getDb();
+  const result = database
+    .prepare("DELETE FROM configs WHERE id = ?")
+    .run(configId);
+  return result.changes > 0;
 }

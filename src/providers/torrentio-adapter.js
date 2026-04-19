@@ -29,19 +29,28 @@ function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
-function createDebridCredential(config) {
-  if (config.debridService === "putio") {
-    if (!config.putioClientId || !config.debridApiKey) {
-      return null;
+async function createDebridCredential(config) {
+  // Prefer encrypted credential; fall back to legacy plaintext apikey for
+  // existing configs created before encryption was added.
+  let secret = config.debridApiKey || null;
+  if (config.debridCredentialCiphertext) {
+    try {
+      const { decryptSecret } = await import("../lib/crypto.js");
+      secret = await decryptSecret(config.debridCredentialCiphertext);
+    } catch {
+      secret = config.debridApiKey || null;
     }
-
-    return `${config.putioClientId}@${config.debridApiKey}`;
   }
 
-  return config.debridApiKey || null;
+  if (config.debridService === "putio") {
+    if (!config.putioClientId || !secret) return null;
+    return `${config.putioClientId}@${secret}`;
+  }
+
+  return secret || null;
 }
 
-function buildConfigPath(config) {
+async function buildConfigPath(config) {
   const segments = [];
   const providers = unique(config.enabledProviders);
 
@@ -81,7 +90,7 @@ function buildConfigPath(config) {
   }
 
   const debridSegment = DEBRID_SEGMENT_BY_SERVICE[config.debridService];
-  const debridCredential = createDebridCredential(config);
+  const debridCredential = await createDebridCredential(config);
   if (debridSegment && debridCredential) {
     segments.push(`${debridSegment}=${encodeURIComponent(debridCredential)}`);
   }
@@ -111,13 +120,13 @@ async function fetchJson(url) {
   }
 }
 
-export function buildTorrentioStreamUrl(config, mediaType, mediaId) {
-  const configPath = buildConfigPath(config);
+export async function buildTorrentioStreamUrl(config, mediaType, mediaId) {
+  const configPath = await buildConfigPath(config);
   return `${TORRENTIO_BASE_URL}/${configPath}/stream/${mediaType}/${encodeURIComponent(mediaId)}.json`;
 }
 
 export async function fetchTorrentioStreams(config, mediaType, mediaId) {
-  const url = buildTorrentioStreamUrl(config, mediaType, mediaId);
+  const url = await buildTorrentioStreamUrl(config, mediaType, mediaId);
   const data = await fetchJson(url);
   return Array.isArray(data?.streams) ? data.streams : [];
 }

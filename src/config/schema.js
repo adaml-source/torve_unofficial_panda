@@ -52,6 +52,9 @@ export function createDefaultConfig() {
     releaseLanguage: "any",
     debridService: "none",
     debridApiKey: "",
+    debridCredentialCiphertext: "",   // v1 encrypted token (preferred over debridApiKey)
+    debridCredentialSource: "",       // "oauth" | "apikey" | ""
+    debridDisplayIdentifier: "",      // e.g. username for UI (no secret)
     putioClientId: "",
     groupByQuality: true,
     sortTorrentsBy: "qualitysize",
@@ -96,6 +99,9 @@ export function sanitizeConfig(input, knownProviders) {
       ? input.debridService
       : defaults.debridService,
     debridApiKey: typeof input?.debridApiKey === "string" ? input.debridApiKey.trim() : "",
+    debridCredentialCiphertext: typeof input?.debridCredentialCiphertext === "string" ? input.debridCredentialCiphertext : "",
+    debridCredentialSource: typeof input?.debridCredentialSource === "string" ? input.debridCredentialSource : "",
+    debridDisplayIdentifier: typeof input?.debridDisplayIdentifier === "string" ? input.debridDisplayIdentifier.trim() : "",
     putioClientId: typeof input?.putioClientId === "string" ? input.putioClientId.trim() : "",
     groupByQuality: sanitizeBoolean(input?.groupByQuality, defaults.groupByQuality),
     sortTorrentsBy: SORT_OPTIONS.includes(input?.sortTorrentsBy)

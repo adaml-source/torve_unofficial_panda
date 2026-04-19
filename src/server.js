@@ -15,6 +15,7 @@ import { getConfigRecord, redactConfigSecrets, saveConfig } from "./config/confi
 import { getProviderRegistry } from "./providers/provider-registry.js";
 import { buildStreams } from "./streams/pipeline.js";
 import { renderConfigPage } from "./ui/config-page.js";
+import { tryHandleV1 } from "./api/v1.js";
 
 const PORT = Number(process.env.PORT || 7000);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -177,6 +178,11 @@ const server = http.createServer(async (request, response) => {
         service: "panda",
         providers: providers.length
       });
+      return;
+    }
+
+    // v1 API (mobile clients)
+    if (await tryHandleV1(request, response, url, providers)) {
       return;
     }
 
