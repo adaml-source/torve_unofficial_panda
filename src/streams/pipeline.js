@@ -1,6 +1,21 @@
 import { fetchTorrentioStreams } from "../providers/torrentio-adapter.js";
 import { fetchUsenetStreams } from "../providers/usenet-adapter.js";
 
+// Hard latency cap per provider. Anything slower is dropped so the
+// client (ktor default ~15s) doesn't disconnect with 499. Easynews and
+// Newznab indexers regularly rate-limit us; we'd rather return partial
+// results than block everything waiting on a dead upstream.
+const PROVIDER_BUDGET_MS = 14000;
+
+function withBudget(promise, source) {
+  return Promise.race([
+    promise.then((streams) => ({ source, streams })),
+    new Promise((resolve) =>
+      setTimeout(() => resolve({ source, streams: [], error: "budget_exceeded" }), PROVIDER_BUDGET_MS)
+    ),
+  ]).catch((err) => ({ source, streams: [], error: err.message }));
+}
+
 export async function buildStreams({
   config,
   mediaType,
@@ -9,18 +24,10 @@ export async function buildStreams({
 }) {
   const sources = [];
 
-  sources.push(
-    fetchTorrentioStreams(config, mediaType, mediaId)
-      .then((streams) => ({ source: "torrentio", streams }))
-      .catch((err) => ({ source: "torrentio", streams: [], error: err.message }))
-  );
+  sources.push(withBudget(fetchTorrentioStreams(config, mediaType, mediaId), "torrentio"));
 
   if (config.enableUsenet) {
-    sources.push(
-      fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl)
-        .then((streams) => ({ source: "usenet", streams }))
-        .catch((err) => ({ source: "usenet", streams: [], error: err.message }))
-    );
+    sources.push(withBudget(fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl), "usenet"));
   }
 
   const results = await Promise.all(sources);

@@ -17,6 +17,7 @@ import {
 import { getConfigRecord, redactConfigSecrets, saveConfig } from "./config/config-store.js";
 import { getProviderRegistry } from "./providers/provider-registry.js";
 import { buildStreams } from "./streams/pipeline.js";
+import { getCachedEasynewsCdnUrl } from "./providers/usenet-adapter.js";
 import { renderConfigPage } from "./ui/config-page.js";
 import { tryHandleV1 } from "./api/v1.js";
 
@@ -360,9 +361,10 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    // Easynews proxy — streams content through Panda so the client doesn't need embedded auth
+    // Easynews proxy — streams content through Panda so the client doesn't need embedded auth.
+    // Supports GET + HEAD, forwards Range headers for seekable playback.
     const easynewsMatch = url.pathname.match(/^\/u\/([^/]+)\/easynews\/([^/]+)\/(.+)$/);
-    if (request.method === "GET" && easynewsMatch) {
+    if ((request.method === "GET" || request.method === "HEAD") && easynewsMatch) {
       const [, token, hash, filename] = easynewsMatch;
       const record = await getStoredConfigOrNull(token);
       if (!record || record.config.usenetProvider !== "easynews") {
@@ -371,29 +373,63 @@ const server = http.createServer(async (request, response) => {
       }
 
       const { usenetUsername, usenetPassword } = record.config;
-      const easynewsUrl = `https://members.easynews.com/dl/${hash}/${filename}`;
+      // Prefer a pre-resolved signed CDN URL (warmed at search time). When the
+      // stream list was built, Panda did the /dl/ 302 resolution and stored
+      // the resulting CDN URL in-process. Going direct to that URL skips the
+      // redirect round-trip AND hits the same CDN node that was warmed — the
+      // player typically sees ~100ms TTFB instead of the 100s cold-start on
+      // the canonical /dl/ endpoint.
+      const cachedCdnUrl = getCachedEasynewsCdnUrl(hash);
+      const easynewsUrl = cachedCdnUrl
+        || `https://members.easynews.com/dl/${hash}/${filename}`;
       const auth = Buffer.from(`${usenetUsername}:${usenetPassword}`).toString("base64");
+
+      // Forward Range header so clients can seek. Only attach Basic auth when
+      // we're hitting the canonical /dl/ endpoint — the signed CDN URL is
+      // self-authenticating and rejects extraneous Authorization headers.
+      const fwdHeaders = {};
+      if (!cachedCdnUrl) fwdHeaders["Authorization"] = `Basic ${auth}`;
+      if (request.headers["range"]) fwdHeaders["Range"] = request.headers["range"];
+      if (request.headers["user-agent"]) fwdHeaders["User-Agent"] = request.headers["user-agent"];
 
       try {
         const upstream = await fetch(easynewsUrl, {
-          headers: { Authorization: `Basic ${auth}` },
+          method: request.method,
+          headers: fwdHeaders,
           redirect: "follow",
         });
 
-        if (!upstream.ok) {
-          sendJson(response, upstream.status, { error: "easynews_upstream_error" });
+        // Build response headers from upstream, preserving partial-content semantics
+        const respHeaders = { "cache-control": "no-store" };
+        for (const h of ["content-type", "content-length", "content-range", "accept-ranges", "last-modified", "etag"]) {
+          const v = upstream.headers.get(h);
+          if (v) respHeaders[h] = v;
+        }
+        if (!respHeaders["accept-ranges"]) respHeaders["accept-ranges"] = "bytes";
+
+        response.writeHead(upstream.status, respHeaders);
+
+        if (request.method === "HEAD" || !upstream.body) {
+          response.end();
           return;
         }
 
-        response.writeHead(upstream.status, {
-          "content-type": upstream.headers.get("content-type") || "application/octet-stream",
-          "content-length": upstream.headers.get("content-length") || "",
-          "accept-ranges": upstream.headers.get("accept-ranges") || "none",
-          "cache-control": "no-store",
+        // fetch() returns a WHATWG ReadableStream. Convert to a Node Readable
+        // and pipe. Use the stream module to support backpressure.
+        const { Readable } = await import("node:stream");
+        const nodeStream = Readable.fromWeb(upstream.body);
+        nodeStream.pipe(response);
+        nodeStream.on("error", (err) => {
+          _log?.debug?.("easynews pipe error:", err.message);
+          try { response.end(); } catch {}
         });
-        upstream.body.pipe(response);
+        response.on("close", () => {
+          try { nodeStream.destroy(); } catch {}
+        });
       } catch (err) {
-        sendJson(response, 502, { error: "easynews_proxy_error", message: err.message });
+        if (!response.headersSent) {
+          sendJson(response, 502, { error: "easynews_proxy_error", message: err.message });
+        }
       }
       return;
     }
