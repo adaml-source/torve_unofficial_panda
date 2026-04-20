@@ -211,13 +211,34 @@ function filterByTitleRelevance(items, title, year, languageTags, languageKeywor
   const keywords = Array.isArray(languageKeywords) ? languageKeywords : [];
   const onlyEnglish = tags.length === 1 && tags[0] === "eng";
 
+  // Scene-release naming convention: `<title>.<year>.<quality>...` for movies
+  // and `<title>.SxxExx.<quality>...` for TV. The title always appears BEFORE
+  // the year/episode marker. Enforcing that position catches false positives
+  // where a title token only appears in a release-group suffix (e.g.
+  // "Der.diskrete.Charme...Remux-Pate" getting matched as "Der Pate").
+  const yearStr = year ? String(year) : null;
+  const seMarker = /s\d{1,2}e\d{1,3}|\d+x\d+/i;
+
   return items.filter(item => {
     const name = (item?.["10"] || "").toLowerCase();
     if (!name) return false;
 
+    // Decide which region of the filename must contain the title. If the
+    // filename has a year or SxxExx marker, only the portion before it
+    // counts (that's where the title lives). Otherwise scan the whole name.
+    let searchRegion = name;
+    if (yearStr) {
+      const yIdx = name.search(new RegExp(`(^|[^0-9])${yearStr}([^0-9]|$)`));
+      if (yIdx > 0) searchRegion = name.slice(0, yIdx);
+    }
+    const seMatch = name.match(seMarker);
+    if (seMatch && seMatch.index > 0 && seMatch.index < searchRegion.length) {
+      searchRegion = name.slice(0, seMatch.index);
+    }
+
     const titleOk = titleRe
-      ? titleRe.test(name)
-      : titleTokens.some(t => name.includes(t));
+      ? titleRe.test(searchRegion)
+      : titleTokens.some(t => searchRegion.includes(t));
     if (!titleOk) return false;
 
     if (tags.length === 0) return true;
