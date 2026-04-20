@@ -398,11 +398,25 @@ const server = http.createServer(async (request, response) => {
       if (request.headers["user-agent"]) fwdHeaders["User-Agent"] = request.headers["user-agent"];
 
       try {
-        const upstream = await fetch(easynewsUrl, {
-          method: request.method,
-          headers: fwdHeaders,
-          redirect: "follow",
-        });
+        // Easynews returns 416 while a cold file is still being prepared on
+        // the CDN node (the sig is valid, but no bytes are available yet).
+        // ExoPlayer treats 416 as fatal and stops. Retry a few times with
+        // short backoff so the proxy absorbs the prep wait (~5-30s typically)
+        // instead of surfacing it as a playback failure.
+        const MAX_ATTEMPTS = 6;
+        const BACKOFF_MS = 2500;
+        let upstream;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          upstream = await fetch(easynewsUrl, {
+            method: request.method,
+            headers: fwdHeaders,
+            redirect: "follow",
+          });
+          if (upstream.status !== 416) break;
+          try { upstream.body?.cancel(); } catch {}
+          if (attempt === MAX_ATTEMPTS) break;
+          await new Promise(r => setTimeout(r, BACKOFF_MS));
+        }
 
         // Build response headers from upstream, preserving partial-content semantics
         const respHeaders = { "cache-control": "no-store" };
