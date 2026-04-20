@@ -21,7 +21,16 @@ const INDEXER_URLS = {
 };
 
 function parseMediaId(mediaId) {
-  const parts = mediaId.split(":");
+  // Stremio's canonical form is `tt12345:1:1` with literal colons. Some HTTP
+  // clients (including ktor in a few configurations) percent-encode colons
+  // in path segments, so the server can see `tt12345%3A1%3A1`. Defensively
+  // decode before splitting so series requests don't silently lose their
+  // season/episode suffix (which then produced no-search-hits on Easynews).
+  let decoded = mediaId;
+  if (decoded.includes("%")) {
+    try { decoded = decodeURIComponent(decoded); } catch { /* keep as-is */ }
+  }
+  const parts = decoded.split(":");
   return {
     imdbId: parts[0],
     season: parts[1] ? parseInt(parts[1], 10) : null,
@@ -411,9 +420,16 @@ async function searchEasynews(config, mediaType, mediaId, baseUrl) {
   // Keep the solr query clean — no language keyword. The filter below enforces
   // language via the alangs array, which is more accurate than fuzzy matching
   // against filenames and returns a wider initial candidate pool.
+  //
+  // Year is only useful for movies: movie filenames conventionally include
+  // the release year, so appending it narrows false positives. TV episode
+  // filenames almost never carry the show's air year — including it in the
+  // query forces Easynews's solr to AND-match a term no episode has,
+  // dropping hits to near zero (measured: Euphoria S01E01 returned 8 results
+  // without year, 1 with). So: append year only when there's no season/episode.
   const buildGps = (title) => {
     const parts = [title];
-    if (year) parts.push(year);
+    if (year && !seSuffix) parts.push(year);
     if (seSuffix) parts.push(seSuffix.trim());
     return parts.join(" ");
   };
