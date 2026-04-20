@@ -564,6 +564,12 @@ export function renderConfigPage({
                   <input type="password" name="usenetPassword" value="${config.usenetPassword || ""}" placeholder="••••••••" autocomplete="off">
                 </label>
               </div>
+              <label style="display:flex;align-items:start;gap:8px;margin-top:10px;font-size:12px;color:var(--text-muted);cursor:pointer;line-height:1.5">
+                <input type="checkbox" name="easynewsPreferNzb"${config.easynewsPreferNzb ? " checked" : ""} style="margin-top:2px">
+                <span>
+                  <strong style="color:var(--text)">Bandwidth saver</strong> — when the same file is found by a configured NZB indexer AND you have a cloud download client (Premiumize / TorBox / AllDebrid) set up, serve the NZB version instead of Easynews. Bandwidth goes through the cloud service, staying under your Easynews data cap. Easynews-only releases are unaffected.
+                </span>
+              </label>
             </div>
 
             <div id="usenet-generic" style="${config.usenetProvider === "generic" ? "" : "display:none"}">
@@ -598,23 +604,36 @@ export function renderConfigPage({
               </div>
             </div>
 
-            <!-- NZB indexer -->
-            <h3 style="font-size:13px;margin-top:20px;margin-bottom:8px">NZB indexer (optional)</h3>
-            <p class="help" style="margin-bottom:10px">Add a Newznab-compatible indexer to find NZB releases. Your app or download client handles the download itself.</p>
-            <div class="grid">
-              <label class="field">
-                <span>Indexer</span>
-                <select name="nzbIndexer" id="nzbIndexer">${optionTags(nzbIndexers, config.nzbIndexer)}</select>
-              </label>
-              <label class="field" id="nzbIndexerUrl-field" style="${config.nzbIndexer === "custom" ? "" : "display:none"}">
-                <span>Indexer URL (custom)</span>
-                <input type="text" name="nzbIndexerUrl" value="${config.nzbIndexerUrl || ""}" placeholder="https://your-indexer.example/api" autocomplete="off">
-              </label>
-              <label class="field" id="nzbIndexerApiKey-field" style="${(config.nzbIndexer && config.nzbIndexer !== "none") ? "" : "display:none"}">
-                <span>Indexer API key</span>
-                <input type="password" name="nzbIndexerApiKey" value="${config.nzbIndexerApiKey || ""}" placeholder="••••••••" autocomplete="off">
-              </label>
+            <!-- NZB indexers (multi) -->
+            <h3 style="font-size:13px;margin-top:20px;margin-bottom:8px">NZB indexers (optional)</h3>
+            <p class="help" style="margin-bottom:10px">Add one or more Newznab-compatible indexers. Panda searches all of them in parallel and merges results. Pair with a cloud download client below to resolve NZBs into playable streams.</p>
+            <div id="nzbIndexerList" data-options='${JSON.stringify(nzbIndexers)}'>
+              ${(() => {
+                const existing = Array.isArray(config.nzbIndexers) && config.nzbIndexers.length > 0
+                  ? config.nzbIndexers
+                  : (config.nzbIndexer && config.nzbIndexer !== "none" && config.nzbIndexerApiKey
+                      ? [{ type: config.nzbIndexer, url: config.nzbIndexerUrl || "", apiKey: config.nzbIndexerApiKey }]
+                      : [{ type: "none", url: "", apiKey: "" }]);
+                return existing.map((row, i) => `
+                  <div class="nzb-indexer-row grid" data-idx="${i}" style="position:relative;padding:10px;background:var(--bg-input,#12121a);border:1px solid var(--border,#27272a);border-radius:8px;margin-bottom:8px">
+                    <label class="field">
+                      <span>Indexer</span>
+                      <select class="nzb-type">${optionTags(nzbIndexers, row.type || "none")}</select>
+                    </label>
+                    <label class="field" style="${row.type === "custom" ? "" : "display:none"}">
+                      <span>URL (custom)</span>
+                      <input type="text" class="nzb-url" value="${row.url || ""}" placeholder="https://your-indexer.example/api" autocomplete="off">
+                    </label>
+                    <label class="field" style="${(row.type && row.type !== "none") ? "" : "display:none"}">
+                      <span>API key</span>
+                      <input type="password" class="nzb-apikey" value="${row.apiKey || ""}" placeholder="••••••••" autocomplete="off">
+                    </label>
+                    <button type="button" class="nzb-remove btn-sm" style="position:absolute;top:8px;right:8px;padding:4px 8px;font-size:11px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;cursor:pointer">Remove</button>
+                  </div>
+                `).join("");
+              })()}
             </div>
+            <button type="button" id="addNzbIndexerBtn" class="btn-sm" style="padding:6px 12px;font-size:12px;background:transparent;color:var(--accent);border:1px solid var(--accent);border-radius:6px;cursor:pointer;margin-top:4px">+ Add another indexer</button>
 
             <!-- Download client -->
             <h3 style="font-size:13px;margin-top:20px;margin-bottom:8px">Download client (optional)</h3>
@@ -697,9 +716,9 @@ export function renderConfigPage({
       const usenetProviderSel = document.getElementById("usenetProvider");
       const usenetEasynews = document.getElementById("usenet-easynews");
       const usenetGeneric = document.getElementById("usenet-generic");
-      const nzbIndexerSel = document.getElementById("nzbIndexer");
-      const nzbIndexerUrlField = document.getElementById("nzbIndexerUrl-field");
-      const nzbIndexerApiKeyField = document.getElementById("nzbIndexerApiKey-field");
+      const nzbIndexerList = document.getElementById("nzbIndexerList");
+      const addNzbIndexerBtn = document.getElementById("addNzbIndexerBtn");
+      const nzbIndexerOptions = JSON.parse(nzbIndexerList.getAttribute("data-options"));
       const downloadClientSel = document.getElementById("downloadClient");
       const dlUrlField = document.getElementById("downloadClientUrl-field");
       const dlAuthField = document.getElementById("downloadClientAuth-field");
@@ -711,25 +730,60 @@ export function renderConfigPage({
         usenetEasynews.style.display = usenetProviderSel.value === "easynews" ? "" : "none";
         usenetGeneric.style.display = usenetProviderSel.value === "generic" ? "" : "none";
 
-        const nzb = nzbIndexerSel.value;
-        const nzbEnabled = nzb && nzb !== "none";
-        nzbIndexerUrlField.style.display = nzb === "custom" ? "" : "none";
-        nzbIndexerApiKeyField.style.display = nzbEnabled ? "" : "none";
-
         const dl = downloadClientSel.value;
         const isLocal = dl === "nzbget" || dl === "sabnzbd";
         const isCloud = dl === "premiumize" || dl === "torbox" || dl === "alldebrid";
-        // Local (self-hosted) clients need a URL. Only NZBget has a Username +
-        // Password field. Both SABnzbd and cloud clients use an API key.
         dlUrlField.style.display = isLocal ? "" : "none";
         dlAuthField.style.display = dl === "nzbget" ? "" : "none";
         dlAuthPwField.style.display = dl === "nzbget" ? "" : "none";
         dlApiKeyField.style.display = (dl === "sabnzbd" || isCloud) ? "" : "none";
       }
 
+      function syncIndexerRow(row) {
+        const typeSel = row.querySelector(".nzb-type");
+        const urlField = row.querySelector(".nzb-url")?.parentElement;
+        const apiKeyField = row.querySelector(".nzb-apikey")?.parentElement;
+        const t = typeSel.value;
+        if (urlField) urlField.style.display = t === "custom" ? "" : "none";
+        if (apiKeyField) apiKeyField.style.display = (t && t !== "none") ? "" : "none";
+      }
+      function wireIndexerRow(row) {
+        row.querySelector(".nzb-type").addEventListener("change", () => syncIndexerRow(row));
+        row.querySelector(".nzb-remove").addEventListener("click", () => {
+          // Keep at least one row present so the user can start over
+          if (nzbIndexerList.children.length > 1) row.remove();
+          else {
+            row.querySelector(".nzb-type").value = "none";
+            row.querySelector(".nzb-apikey").value = "";
+            if (row.querySelector(".nzb-url")) row.querySelector(".nzb-url").value = "";
+            syncIndexerRow(row);
+          }
+        });
+        syncIndexerRow(row);
+      }
+      Array.from(nzbIndexerList.querySelectorAll(".nzb-indexer-row")).forEach(wireIndexerRow);
+      addNzbIndexerBtn.addEventListener("click", () => {
+        const idx = nzbIndexerList.children.length;
+        const typeOpts = nzbIndexerOptions.map(function(o) { return '<option value="' + o + '">' + o + '</option>'; }).join("");
+        // Build with concatenation — this whole <script> lives inside the
+        // outer renderConfigPage template literal, so a nested template
+        // literal's \${} would be consumed by the outer renderer.
+        const html =
+          '<div class="nzb-indexer-row grid" data-idx="' + idx + '" style="position:relative;padding:10px;background:var(--bg-input,#12121a);border:1px solid var(--border,#27272a);border-radius:8px;margin-bottom:8px">' +
+            '<label class="field"><span>Indexer</span><select class="nzb-type">' + typeOpts + '</select></label>' +
+            '<label class="field" style="display:none"><span>URL (custom)</span><input type="text" class="nzb-url" placeholder="https://your-indexer.example/api" autocomplete="off"></label>' +
+            '<label class="field" style="display:none"><span>API key</span><input type="password" class="nzb-apikey" placeholder="••••••••" autocomplete="off"></label>' +
+            '<button type="button" class="nzb-remove btn-sm" style="position:absolute;top:8px;right:8px;padding:4px 8px;font-size:11px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;cursor:pointer">Remove</button>' +
+          '</div>';
+        const tmp = document.createElement("div");
+        tmp.innerHTML = html;
+        const newRow = tmp.firstElementChild;
+        nzbIndexerList.appendChild(newRow);
+        wireIndexerRow(newRow);
+      });
+
       enableUsenet.addEventListener("change", syncUsenet);
       usenetProviderSel.addEventListener("change", syncUsenet);
-      nzbIndexerSel.addEventListener("change", syncUsenet);
       downloadClientSel.addEventListener("change", syncUsenet);
       syncUsenet();
 
@@ -783,9 +837,30 @@ export function renderConfigPage({
           usenetPassword: formData.get("usenetPassword") || "",
           usenetSSL: formData.get("usenetSSL") === "on",
           usenetConnections: Number(formData.get("usenetConnections")) || 10,
-          nzbIndexer: formData.get("nzbIndexer") || "none",
-          nzbIndexerUrl: formData.get("nzbIndexerUrl") || "",
-          nzbIndexerApiKey: formData.get("nzbIndexerApiKey") || "",
+          // Multi-indexer: collect rows, drop empty/unconfigured ones.
+          // Legacy nzbIndexer/nzbIndexerApiKey still written from the first
+          // configured row so older code paths keep working.
+          nzbIndexers: (() => {
+            const rows = Array.from(document.querySelectorAll(".nzb-indexer-row"));
+            return rows.map(r => ({
+              type: r.querySelector(".nzb-type").value,
+              url: r.querySelector(".nzb-url")?.value || "",
+              apiKey: r.querySelector(".nzb-apikey")?.value || "",
+            })).filter(x => x.type && x.type !== "none" && x.apiKey);
+          })(),
+          nzbIndexer: (() => {
+            const first = document.querySelector(".nzb-indexer-row");
+            return first?.querySelector(".nzb-type")?.value || "none";
+          })(),
+          nzbIndexerUrl: (() => {
+            const first = document.querySelector(".nzb-indexer-row");
+            return first?.querySelector(".nzb-url")?.value || "";
+          })(),
+          nzbIndexerApiKey: (() => {
+            const first = document.querySelector(".nzb-indexer-row");
+            return first?.querySelector(".nzb-apikey")?.value || "";
+          })(),
+          easynewsPreferNzb: formData.get("easynewsPreferNzb") === "on",
           downloadClient: formData.get("downloadClient") || "none",
           downloadClientUrl: formData.get("downloadClientUrl") || "",
           downloadClientUsername: formData.get("downloadClientUsername") || "",

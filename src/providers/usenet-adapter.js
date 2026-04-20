@@ -569,18 +569,34 @@ async function searchEasynews(config, mediaType, mediaId, baseUrl) {
 
 // ── Newznab indexer ──
 
-async function searchNewznab(config, mediaType, mediaId) {
-  const indexerUrl = config.nzbIndexer === "custom"
-    ? config.nzbIndexerUrl
-    : INDEXER_URLS[config.nzbIndexer];
+/**
+ * Resolve the configured list of NZB indexers. Normalises the legacy
+ * single-indexer schema into the same shape the multi-indexer path uses.
+ * Each entry: { type, url, apiKey, displayName }.
+ */
+function getConfiguredIndexers(config) {
+  const list = Array.isArray(config.nzbIndexers) && config.nzbIndexers.length > 0
+    ? config.nzbIndexers
+    : (config.nzbIndexer && config.nzbIndexer !== "none" && config.nzbIndexerApiKey
+        ? [{ type: config.nzbIndexer, url: config.nzbIndexerUrl, apiKey: config.nzbIndexerApiKey }]
+        : []);
+  return list.map((r) => {
+    const url = r.type === "custom" ? r.url : INDEXER_URLS[r.type];
+    return url && r.apiKey ? {
+      type: r.type,
+      url,
+      apiKey: r.apiKey,
+      displayName: r.type === "custom" ? "NZB" : r.type.toUpperCase(),
+    } : null;
+  }).filter(Boolean);
+}
 
-  if (!indexerUrl || !config.nzbIndexerApiKey) return [];
-
+async function searchOneNewznab(indexer, config, mediaType, mediaId) {
   const { imdbId, season, episode } = parseMediaId(mediaId);
   const imdbNum = imdbId.replace("tt", "");
 
   const params = new URLSearchParams({
-    apikey: config.nzbIndexerApiKey,
+    apikey: indexer.apiKey,
     o: "json",
     limit: "15",
   });
@@ -596,8 +612,8 @@ async function searchNewznab(config, mediaType, mediaId) {
   }
 
   try {
-    const baseUrl = indexerUrl.replace(/\/+$/, "");
-    const cacheKey = `nzb:${config.nzbIndexer}:${config.nzbIndexerApiKey.slice(0, 8)}:${mediaType}:${mediaId}`;
+    const baseUrl = indexer.url.replace(/\/+$/, "");
+    const cacheKey = `nzb:${indexer.type}:${indexer.apiKey.slice(0, 8)}:${mediaType}:${mediaId}`;
     const items = await searchCache.memoize(
       cacheKey,
       async () => {
@@ -612,7 +628,7 @@ async function searchNewznab(config, mediaType, mediaId) {
     );
 
     const kept = items.slice(0, 15);
-    const indexerName = config.nzbIndexer === "custom" ? "NZB" : config.nzbIndexer.toUpperCase();
+    const indexerName = indexer.displayName;
 
     // If the user has a cloud NZB client configured, try to resolve each NZB
     // to a direct stream URL. Unresolved entries (not cached / still
@@ -660,21 +676,71 @@ async function searchNewznab(config, mediaType, mediaId) {
         url: nzbUrl,
         behaviorHints: {
           notWebReady: true,
-          bingeGroup: `usenet-nzb-${config.nzbIndexer}`,
+          bingeGroup: `usenet-nzb-${indexer.type}`,
         },
       };
     });
   } catch (err) {
-    console.error(`Newznab search failed (${config.nzbIndexer}): ${err.message}`);
+    console.error(`Newznab search failed (${indexer.type}): ${err.message}`);
     return [];
   }
 }
 
+/**
+ * Run every configured NZB indexer in parallel, merge the resolved streams,
+ * dedupe by URL so the same NZB picked up by two indexers doesn't appear
+ * twice. Each indexer inherits the same cloud-debrid / local-downloader
+ * config, so resolution is uniform.
+ */
+async function searchNewznab(config, mediaType, mediaId) {
+  const indexers = getConfiguredIndexers(config);
+  if (indexers.length === 0) return [];
+
+  const batches = await Promise.all(
+    indexers.map((idx) =>
+      searchOneNewznab(idx, config, mediaType, mediaId).catch((err) => {
+        console.error(`Indexer ${idx.type} failed: ${err.message}`);
+        return [];
+      }),
+    ),
+  );
+
+  const seen = new Set();
+  const merged = [];
+  for (const batch of batches) {
+    for (const stream of batch) {
+      const key = stream.behaviorHints?.filename || stream.url;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        merged.push(stream);
+      }
+    }
+  }
+  return merged;
+}
+
 // ── Public API ──
+
+/**
+ * Coarse filename-matching for cross-source deduplication. Two streams that
+ * refer to the same underlying release (e.g. `Send.Help.2026.GERMAN.DL` on
+ * both Easynews and SCENENZBS) should be recognised as equivalent. We key
+ * on a normalized version of the filename: lowercase, everything except
+ * alphanumerics and dots collapsed, extensions trimmed.
+ */
+function releaseKey(stream) {
+  const fn = (stream.behaviorHints?.filename || "").toLowerCase();
+  if (!fn) return null;
+  return fn
+    .replace(/\.(mkv|mp4|avi|mov|m4v|ts|wmv|mpg|mpeg)$/i, "")
+    .replace(/[^a-z0-9.]+/g, ".")
+    .replace(/\.+/g, ".");
+}
 
 export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl) {
   if (!config.enableUsenet) return [];
 
+  const hasAnyIndexer = getConfiguredIndexers(config).length > 0;
   const sources = [];
 
   if (config.usenetProvider === "easynews") {
@@ -682,21 +748,40 @@ export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUr
       searchEasynews(config, mediaType, mediaId, proxyBaseUrl).catch((err) => {
         console.error(`Easynews adapter error: ${err.message}`);
         return [];
-      }),
+      }).then((s) => ({ source: "easynews", streams: s })),
     );
   }
 
-  if (config.nzbIndexer !== "none") {
+  if (hasAnyIndexer) {
     sources.push(
       searchNewznab(config, mediaType, mediaId).catch((err) => {
         console.error(`Newznab adapter error: ${err.message}`);
         return [];
-      }),
+      }).then((s) => ({ source: "nzb", streams: s })),
     );
   }
 
   if (sources.length === 0) return [];
 
-  const results = await Promise.all(sources);
-  return results.flat();
+  const tagged = await Promise.all(sources);
+  const easynewsStreams = tagged.find((t) => t.source === "easynews")?.streams || [];
+  const nzbStreams = tagged.find((t) => t.source === "nzb")?.streams || [];
+
+  // Bandwidth saver: when the user has a cloud-NZB client AND opted in,
+  // drop any Easynews direct stream whose release is also available through
+  // the NZB cloud path. The NZB version is served from PM/TorBox so playback
+  // bandwidth doesn't eat into the Easynews monthly cap.
+  const cloudNzbActive = isCloudDownloadClient(config.downloadClient) && !!config.downloadClientApiKey;
+  const shouldShiftBandwidth = config.easynewsPreferNzb === true && cloudNzbActive && nzbStreams.length > 0;
+  const resolvedEasynews = shouldShiftBandwidth
+    ? (() => {
+        const nzbKeys = new Set(nzbStreams.map(releaseKey).filter(Boolean));
+        return easynewsStreams.filter((s) => {
+          const k = releaseKey(s);
+          return !k || !nzbKeys.has(k);
+        });
+      })()
+    : easynewsStreams;
+
+  return [...resolvedEasynews, ...nzbStreams];
 }

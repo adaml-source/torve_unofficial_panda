@@ -87,9 +87,11 @@ export function createDefaultConfig() {
     usenetPassword: "",
     usenetSSL: true,
     usenetConnections: 10,
-    nzbIndexer: "none",
-    nzbIndexerUrl: "",
-    nzbIndexerApiKey: "",
+    nzbIndexer: "none",        // legacy single-indexer field; first item of nzbIndexers
+    nzbIndexerUrl: "",         // legacy — custom URL for the legacy indexer slot
+    nzbIndexerApiKey: "",      // legacy — api key for the legacy indexer slot
+    nzbIndexers: [],           // preferred: [{ type, url, apiKey }] — searched in parallel, results merged
+    easynewsPreferNzb: false,  // bandwidth saver: if a NZB indexer + cloud debrid both have the same file, drop Easynews direct stream
     downloadClient: "none",
     downloadClientUrl: "",
     downloadClientUsername: "",
@@ -181,6 +183,31 @@ export function sanitizeConfig(input, knownProviders) {
       : defaults.nzbIndexer,
     nzbIndexerUrl: sanitizeString(input?.nzbIndexerUrl),
     nzbIndexerApiKey: sanitizeString(input?.nzbIndexerApiKey),
+    // Multi-indexer array. Each entry: { type, url, apiKey }. url is only
+    // meaningful when type === "custom". Drop rows with type === "none" and
+    // rows missing an API key. Fall back to the legacy single-indexer fields
+    // when the array is empty, so existing configs upgrade without editing.
+    nzbIndexers: (() => {
+      const raw = Array.isArray(input?.nzbIndexers) ? input.nzbIndexers : [];
+      const cleaned = raw
+        .map((r) => r && typeof r === "object"
+          ? {
+              type: NZB_INDEXERS.includes(r.type) && r.type !== "none" ? r.type : null,
+              url: sanitizeString(r.url),
+              apiKey: sanitizeString(r.apiKey),
+            }
+          : null)
+        .filter((r) => r && r.type && r.apiKey);
+      if (cleaned.length > 0) return cleaned;
+      // Legacy upgrade path
+      const legacyType = NZB_INDEXERS.includes(input?.nzbIndexer) ? input.nzbIndexer : "none";
+      const legacyKey = sanitizeString(input?.nzbIndexerApiKey);
+      if (legacyType !== "none" && legacyKey) {
+        return [{ type: legacyType, url: sanitizeString(input?.nzbIndexerUrl), apiKey: legacyKey }];
+      }
+      return [];
+    })(),
+    easynewsPreferNzb: sanitizeBoolean(input?.easynewsPreferNzb, defaults.easynewsPreferNzb),
     downloadClient: DOWNLOAD_CLIENTS.includes(input?.downloadClient)
       ? input.downloadClient
       : defaults.downloadClient,
