@@ -203,7 +203,20 @@ const STOP_WORDS = new Set([
  *   poorly-tagged releases. If only "eng" is requested, items with no tags
  *   at all are kept (untagged scene releases default to English).
  */
-function filterByTitleRelevance(items, title, year, languageTags, languageKeywords) {
+// Minimum runtime (seconds) we accept for a result. Anything shorter is
+// almost certainly a clip / trailer / sample / movieclip.com rip that would
+// match the title filter but has no actual feature content.
+// Movies: real runtimes are 60-240 min; set the floor at 40 min to cover
+//   shorts and unusually-short indie films while rejecting the usual noise.
+// Series: episodes can be as short as ~10 min (animated shorts, some comedy).
+//   Floor at 8 min tolerates those but still rejects the classic 30-60s samples.
+const MIN_RUNTIME_MOVIE_S = 40 * 60;
+const MIN_RUNTIME_SERIES_S = 8 * 60;
+
+// Filenames that almost always mean "this is not the actual video".
+const CLIP_MARKERS = /\b(movieclips?|trailer|teaser|promo|behind[.\-_ ]the[.\-_ ]scenes|bts|featurette|interview|b[.\-_ ]?roll|deleted[.\-_ ]scenes?|bloopers?)\b/i;
+
+function filterByTitleRelevance(items, title, year, languageTags, languageKeywords, mediaType) {
   const titleTokens = tokenize(title).filter(t => !STOP_WORDS.has(t) && t.length > 1);
   const lowTitle = String(title).toLowerCase().replace(/\s+/g, "[. _-]+");
   const titleRe = titleTokens.length === 0 ? new RegExp(lowTitle) : null;
@@ -219,9 +232,24 @@ function filterByTitleRelevance(items, title, year, languageTags, languageKeywor
   const yearStr = year ? String(year) : null;
   const seMarker = /s\d{1,2}e\d{1,3}|\d+x\d+/i;
 
+  const minRuntime = mediaType === "series" ? MIN_RUNTIME_SERIES_S : MIN_RUNTIME_MOVIE_S;
+
   return items.filter(item => {
     const name = (item?.["10"] || "").toLowerCase();
     if (!name) return false;
+
+    // Reject obvious non-feature content regardless of length (some clips
+    // are padded/looped to look longer). Matches "movieclip", "trailer",
+    // "behind.the.scenes", etc. in the filename.
+    if (CLIP_MARKERS.test(name)) return false;
+
+    // Reject short files — Easynews provides `runtime` as seconds. Missing
+    // runtime → fall back to file size as a proxy (samples are typically
+    // <200MB even at 4K). rawSize is already known non-zero from the earlier
+    // video-ext filter.
+    const runtime = Number(item?.runtime) || 0;
+    if (runtime > 0 && runtime < minRuntime) return false;
+    if (runtime === 0 && Number(item?.rawSize) < 200 * 1024 * 1024) return false;
 
     // Decide which region of the filename must contain the title. If the
     // filename has a year or SxxExx marker, only the portion before it
@@ -460,7 +488,7 @@ async function searchEasynews(config, mediaType, mediaId, baseUrl) {
     try {
       const batch = await easynewsQuery(buildGps(title), config);
       return Array.isArray(batch)
-        ? filterByTitleRelevance(batch, title, year, filterTags, filterKeywords)
+        ? filterByTitleRelevance(batch, title, year, filterTags, filterKeywords, mediaType)
         : [];
     } catch (err) {
       console.error(`Easynews ${label} search failed: ${err.message}`);
