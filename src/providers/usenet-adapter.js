@@ -311,10 +311,12 @@ function warmEasynewsCdn(cdnUrl) {
   const controller = new AbortController();
   // 2 minutes is enough to cover even the worst cold-start we've seen (~100s).
   // We discard the response body; we just need Easynews's side to do the work.
+  // Use a non-trivial range (1 MB) — some CDN nodes treat `bytes=0-0` as a
+  // no-op and skip the file-prep path that actually warms the cache.
   setTimeout(() => controller.abort(), 120000);
   fetch(cdnUrl, {
     method: "GET",
-    headers: { Range: "bytes=0-0" },
+    headers: { Range: "bytes=0-1048575" },
     signal: controller.signal,
   })
     .then((res) => { try { res.body?.cancel(); } catch {} })

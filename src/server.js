@@ -400,10 +400,10 @@ const server = http.createServer(async (request, response) => {
       try {
         // Easynews returns 416 while a cold file is still being prepared on
         // the CDN node (the sig is valid, but no bytes are available yet).
-        // ExoPlayer treats 416 as fatal and stops. Retry a few times with
-        // short backoff so the proxy absorbs the prep wait (~5-30s typically)
-        // instead of surfacing it as a playback failure.
-        const MAX_ATTEMPTS = 6;
+        // ExoPlayer treats 416 as fatal and stops, so we absorb the prep
+        // wait here. 12 × 2.5s ≈ 30s covers ~98% of cold-starts while not
+        // hanging the client for a full minute on genuinely unavailable files.
+        const MAX_ATTEMPTS = 12;
         const BACKOFF_MS = 2500;
         let upstream;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
