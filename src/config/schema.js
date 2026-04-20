@@ -64,7 +64,8 @@ export function createDefaultConfig() {
     enabledProviders: DEFAULT_PROVIDER_IDS,
     qualityProfile: "balanced",
     maxQuality: "2160p",
-    releaseLanguage: "any",
+    releaseLanguage: "any",       // legacy single-value field, kept for back-compat
+    releaseLanguages: ["any"],    // preferred: list of audio-languages to allow
     debridService: "none",
     debridApiKey: "",
     debridCredentialCiphertext: "",   // v1 encrypted token (preferred over debridApiKey)
@@ -131,6 +132,21 @@ export function sanitizeConfig(input, knownProviders) {
     releaseLanguage: RELEASE_LANGUAGES.includes(input?.releaseLanguage)
       ? input.releaseLanguage
       : defaults.releaseLanguage,
+    // releaseLanguages: read preferred array; if missing, fall back to the
+    // legacy releaseLanguage scalar so an older config upgrades cleanly.
+    // ["any"] and [] both mean "no language filter".
+    releaseLanguages: (() => {
+      const arr = sanitizeStringArray(input?.releaseLanguages, RELEASE_LANGUAGES);
+      if (arr.length > 0) {
+        // If "any" is in the list, collapse to just ["any"] — the UI toggle
+        // should enforce this, but defend in depth.
+        return arr.includes("any") ? ["any"] : arr;
+      }
+      const legacy = RELEASE_LANGUAGES.includes(input?.releaseLanguage)
+        ? input.releaseLanguage
+        : defaults.releaseLanguage;
+      return [legacy];
+    })(),
     debridService: DEBRID_SERVICES.includes(input?.debridService)
       ? input.debridService
       : defaults.debridService,

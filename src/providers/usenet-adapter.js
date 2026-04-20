@@ -180,21 +180,27 @@ const STOP_WORDS = new Set([
 
 /**
  * Drop results whose filenames don't contain the main title keywords, and
- * (optionally) whose audio tracks don't include the user's preferred language.
+ * (optionally) whose audio tracks don't include any of the user's preferred
+ * languages.
  *
  * Title-relevance: guards against Easynews's fuzzy `gps` returning unrelated
  *   content. Rule: at least one non-stop-word title token must appear in the
  *   filename base. If the title is entirely stop-words, require the full title
  *   string (spaces-to-dots) to appear.
  *
- * Language: if `languageTag` is set, keep items whose `alangs` array contains
- *   that tag OR whose filename includes the language keyword (".german.",
- *   ".fre.", etc.) as a fallback for poorly-tagged releases.
+ * Language (multi): `languageTags`/`languageKeywords` are arrays. Empty ⇒ no
+ *   language filter. Item passes if ANY of its `alangs` codes is in the tags
+ *   list, OR the filename contains one of the keywords as a fallback for
+ *   poorly-tagged releases. If only "eng" is requested, items with no tags
+ *   at all are kept (untagged scene releases default to English).
  */
-function filterByTitleRelevance(items, title, year, languageTag, languageKeyword) {
+function filterByTitleRelevance(items, title, year, languageTags, languageKeywords) {
   const titleTokens = tokenize(title).filter(t => !STOP_WORDS.has(t) && t.length > 1);
   const lowTitle = String(title).toLowerCase().replace(/\s+/g, "[. _-]+");
   const titleRe = titleTokens.length === 0 ? new RegExp(lowTitle) : null;
+  const tags = Array.isArray(languageTags) ? languageTags : [];
+  const keywords = Array.isArray(languageKeywords) ? languageKeywords : [];
+  const onlyEnglish = tags.length === 1 && tags[0] === "eng";
 
   return items.filter(item => {
     const name = (item?.["10"] || "").toLowerCase();
@@ -205,21 +211,39 @@ function filterByTitleRelevance(items, title, year, languageTag, languageKeyword
       : titleTokens.some(t => name.includes(t));
     if (!titleOk) return false;
 
-    if (languageTag) {
-      const alangs = Array.isArray(item.alangs) ? item.alangs : [];
-      const hasLangTag = alangs.includes(languageTag);
-      const hasLangKeyword = languageKeyword && name.includes(languageKeyword);
-      // Non-English requests are strict: require an explicit audio tag or
-      // filename marker. English requests accept untagged releases (the vast
-      // majority of untagged scene releases are English by default).
-      if (languageTag === "eng") {
-        if (alangs.length > 0 && !hasLangTag && !hasLangKeyword) return false;
-      } else {
-        if (!hasLangTag && !hasLangKeyword) return false;
-      }
+    if (tags.length === 0) return true;
+
+    const alangs = Array.isArray(item.alangs) ? item.alangs : [];
+    const hasLangTag = alangs.some((l) => tags.includes(l));
+    const hasLangKeyword = keywords.some((k) => name.includes(k));
+
+    if (onlyEnglish) {
+      // Untagged releases are almost always English — keep them.
+      if (alangs.length > 0 && !hasLangTag && !hasLangKeyword) return false;
+    } else {
+      if (!hasLangTag && !hasLangKeyword) return false;
     }
     return true;
   });
+}
+
+/**
+ * Human-readable language tag string for display on a stream entry. Uses ISO
+ * 639-2 → uppercase ISO 639-1 mapping, since the UI shouldn't care about
+ * Easynews's bibliographic code choice. Returns e.g. "DE, EN" or "".
+ */
+const EZ_TAG_TO_ISO1 = {};
+for (const [iso1, { tag }] of Object.entries(LANG_EZ_MAP)) {
+  EZ_TAG_TO_ISO1[tag] = iso1;
+}
+function describeAudioLanguages(alangs) {
+  if (!Array.isArray(alangs) || alangs.length === 0) return "";
+  const codes = alangs
+    .map((t) => EZ_TAG_TO_ISO1[t] || (t && t.length >= 2 ? t.slice(0, 2) : ""))
+    .filter(Boolean)
+    .map((c) => c.toUpperCase());
+  const unique = [...new Set(codes)];
+  return unique.join(", ");
 }
 
 /**
@@ -341,75 +365,104 @@ async function searchEasynews(config, mediaType, mediaId, baseUrl) {
     ? ` S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`
     : "";
 
-  // Strategy: title-based serial search with early exit.
+  // Strategy: multi-language title-based search.
   //
-  // We skip the IMDB-number search even though Easynews accepts it: their `gps`
-  // parameter does a fuzzy full-text match, and numeric IDs collide with
-  // unrelated files (file hashes, size fields). Example: gps=8036976 ("Send
-  // Help") returned four random unrelated files. Title+year is both faster
-  // (serial, 1-2s) and dramatically more accurate.
+  // The user's `releaseLanguages` is an allow-list of audio languages they
+  // want results in. "any" (or an empty list) disables the filter. For each
+  // non-English language in the list we do a Wikidata lookup to find the
+  // localized title (so `Send Help` → `Send Help` for DE, but
+  // `Project Hail Mary` → `Der Astronaut` for DE). Then we run at most
+  // max(1 + N_non_english, 2) serial Easynews queries (serial to avoid
+  // Easynews's parallel-request throttle measured elsewhere), union the
+  // results, and filter by `alangs` so every returned file actually has one
+  // of the requested audio tracks.
   //
-  //   1. Localized title+year  (non-English users)  → return if hits
-  //   2. English title+year                         → return if hits
-  //
-  // Results are then passed through a filename relevance filter so a broken
-  // search (e.g. user types a title that matches thousands of junk files)
-  // still returns zero rather than garbage.
-  const langKey = String(config.releaseLanguage || "any").toLowerCase();
-  const langCode = LANG_CODE_MAP[langKey];
-  const wantLocalized = langCode && langCode !== "en";
-  const ezLang = langCode ? LANG_EZ_MAP[langCode] : null;
-  // No language filter when user picked "any"
-  const filterTag = ezLang?.tag || null;
-  const filterKeyword = ezLang?.keyword || null;
+  // Filename relevance filter still runs to drop fuzzy-search false matches.
+  const userLanguages = Array.isArray(config.releaseLanguages) && config.releaseLanguages.length > 0
+    ? config.releaseLanguages.map((l) => String(l).toLowerCase())
+    : [String(config.releaseLanguage || "any").toLowerCase()];
+  const wantAny = userLanguages.includes("any") || userLanguages.length === 0;
+  // Map each selected language into its Easynews tag + keyword + ISO 639-1
+  // (for Wikidata). "multi" has no tag; we ignore it in filtering.
+  const langSpecs = wantAny
+    ? []
+    : userLanguages
+        .map((l) => {
+          const code = LANG_CODE_MAP[l];
+          if (!code) return null;
+          const ez = LANG_EZ_MAP[code];
+          return ez ? { key: l, code, tag: ez.tag, keyword: ez.keyword } : null;
+        })
+        .filter(Boolean);
+  const filterTags = langSpecs.map((s) => s.tag);
+  const filterKeywords = langSpecs.map((s) => s.keyword);
+  const nonEnglishCodes = langSpecs.map((s) => s.code).filter((c) => c !== "en");
 
   const [metaResult, localizedResult] = await Promise.all([
     fetchMediaTitle(mediaType, mediaId).catch(() => null),
-    wantLocalized ? fetchLocalizedTitles(imdbId, [langCode]).catch(() => ({})) : Promise.resolve({}),
+    nonEnglishCodes.length > 0
+      ? fetchLocalizedTitles(imdbId, nonEnglishCodes).catch(() => ({}))
+      : Promise.resolve({}),
   ]);
   const year = metaResult?.year ? String(metaResult.year).match(/\d{4}/)?.[0] : null;
 
-  // Append language keyword to localized/non-English searches. For English,
-  // leave the query clean (scene releases rarely label .english. in filenames).
-  const buildGps = (title, includeLangKeyword) => {
+  // Keep the solr query clean — no language keyword. The filter below enforces
+  // language via the alangs array, which is more accurate than fuzzy matching
+  // against filenames and returns a wider initial candidate pool.
+  const buildGps = (title) => {
     const parts = [title];
     if (year) parts.push(year);
     if (seSuffix) parts.push(seSuffix.trim());
-    if (includeLangKeyword && filterKeyword && filterKeyword !== "english") {
-      parts.push(filterKeyword);
-    }
     return parts.join(" ");
   };
 
-  const tryQuery = async (label, title, includeLangKeyword) => {
+  const runQuery = async (label, title) => {
     if (!title) return [];
     try {
-      const batch = await easynewsQuery(buildGps(title, includeLangKeyword), config);
-      const filtered = Array.isArray(batch)
-        ? filterByTitleRelevance(batch, title, year, filterTag, filterKeyword)
+      const batch = await easynewsQuery(buildGps(title), config);
+      return Array.isArray(batch)
+        ? filterByTitleRelevance(batch, title, year, filterTags, filterKeywords)
         : [];
-      return filtered;
     } catch (err) {
       console.error(`Easynews ${label} search failed: ${err.message}`);
       return [];
     }
   };
 
-  const localizedTitle = wantLocalized ? localizedResult?.[langCode] : null;
-  let rawItems = [];
+  // Merge results across localized + English queries, dedupe by signature.
+  const merged = [];
+  const seenSigs = new Set();
+  const mergeBatch = (batch) => {
+    for (const item of batch) {
+      const sig = item?.["0"];
+      if (sig && !seenSigs.has(sig)) {
+        seenSigs.add(sig);
+        merged.push(item);
+      }
+    }
+  };
 
-  if (localizedTitle) {
-    console.log(`Easynews localized search: ${localizedTitle} (${langCode}) year=${year}`);
-    // Localized title + language keyword: maximum signal for dubbed releases
-    rawItems = await tryQuery("localized title", localizedTitle, true);
+  // One query per non-English language whose localized title differs from
+  // the English title. Then one English query to catch originals and
+  // multi-lang releases. Cheapest order first.
+  const queriedTitles = new Set();
+  for (const code of nonEnglishCodes) {
+    const localizedTitle = localizedResult?.[code];
+    if (!localizedTitle) continue;
+    const norm = localizedTitle.toLowerCase();
+    if (queriedTitles.has(norm)) continue;
+    queriedTitles.add(norm);
+    console.log(`Easynews localized search: ${localizedTitle} (${code}) year=${year}`);
+    mergeBatch(await runQuery(`localized:${code}`, localizedTitle));
   }
-
-  if (rawItems.length === 0 && metaResult?.name && metaResult.name !== localizedTitle) {
-    // English-title fallback: still ask Easynews for the localized audio so
-    // German users who open a movie with no German-language metadata still
-    // get a dubbed release if it was posted under the English name.
-    rawItems = await tryQuery("english title", metaResult.name, wantLocalized);
+  if (metaResult?.name) {
+    const norm = metaResult.name.toLowerCase();
+    if (!queriedTitles.has(norm)) {
+      queriedTitles.add(norm);
+      mergeBatch(await runQuery("english title", metaResult.name));
+    }
   }
+  let rawItems = merged;
 
   try {
     const data = { data: rawItems };
@@ -477,11 +530,16 @@ async function searchEasynews(config, mediaType, mediaId, baseUrl) {
       else if (height >= 600) qualityLabel = "720p";
       else if (height >= 400) qualityLabel = "480p";
 
+      // Audio-language badge — helps the user distinguish an EN-only file
+      // from a multi-lang release when the stream list mixes languages.
+      const langTag = describeAudioLanguages(item.alangs);
+      const langSuffix = langTag ? ` 🗣️ ${langTag}` : "";
+
       return {
         // Torrentio-style name: addon newline quality
         name: qualityLabel ? `Easynews\n${qualityLabel}` : "Easynews",
         // Torrentio-style title: filename newline metadata row
-        title: `${fileName}\n📺 ${resolution} 💾 ${size} ⚙️ ${codec || "-"}`,
+        title: `${fileName}\n📺 ${resolution} 💾 ${size} ⚙️ ${codec || "-"}${langSuffix}`,
         url: streamUrl,
         behaviorHints: {
           // Keep these explicit — the Torve Android app uses them to decide

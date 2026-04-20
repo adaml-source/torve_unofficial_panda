@@ -471,8 +471,20 @@ export function renderConfigPage({
             <select name="maxQuality">${optionTags(qualityOptions, config.maxQuality)}</select>
           </label>
           <label class="field">
-            <span>Preferred release language</span>
-            <select name="releaseLanguage">${optionTags(releaseLanguages, config.releaseLanguage)}</select>
+            <span>Preferred release languages</span>
+            <div class="lang-multiselect" id="langMultiselect" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:var(--bg-input,#12121a);border:1px solid var(--border,#27272a);border-radius:8px">
+              ${releaseLanguages.map((lang) => {
+                const current = Array.isArray(config.releaseLanguages) && config.releaseLanguages.length > 0
+                  ? config.releaseLanguages
+                  : [config.releaseLanguage || "any"];
+                const checked = current.includes(lang) ? "checked" : "";
+                return `<label class="lang-chip" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:999px;background:var(--bg-surface,#15151c);border:1px solid var(--border,#27272a);font-size:12px;cursor:pointer">
+                  <input type="checkbox" name="releaseLanguages" value="${lang}" ${checked} style="margin:0">
+                  <span>${lang}</span>
+                </label>`;
+              }).join("")}
+            </div>
+            <small style="color:var(--text-muted);font-size:11px;margin-top:6px">Pick all languages you want in results. "any" disables the filter. Every stream is tagged with its audio language(s) so you can pick.</small>
           </label>
         </div>
 
@@ -721,6 +733,22 @@ export function renderConfigPage({
       downloadClientSel.addEventListener("change", syncUsenet);
       syncUsenet();
 
+      // ── Language multi-select: "any" toggle exclusivity ─────────────
+      // If the user checks "any", uncheck everything else. If they check
+      // any specific language, uncheck "any". Empty selection defaults
+      // back to "any" on submit (handled in the submit handler).
+      const langBoxes = Array.from(document.querySelectorAll('input[name="releaseLanguages"]'));
+      function syncLangSelection(clicked) {
+        if (!clicked) return;
+        if (clicked.value === "any" && clicked.checked) {
+          langBoxes.forEach((cb) => { if (cb.value !== "any") cb.checked = false; });
+        } else if (clicked.value !== "any" && clicked.checked) {
+          const anyBox = langBoxes.find((cb) => cb.value === "any");
+          if (anyBox) anyBox.checked = false;
+        }
+      }
+      langBoxes.forEach((cb) => cb.addEventListener("change", () => syncLangSelection(cb)));
+
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
 
@@ -729,7 +757,13 @@ export function renderConfigPage({
           version: 2,
           qualityProfile: formData.get("qualityProfile"),
           maxQuality: formData.get("maxQuality"),
-          releaseLanguage: formData.get("releaseLanguage"),
+          releaseLanguage: formData.getAll("releaseLanguages")[0] || "any", // legacy single-value, first selected
+          releaseLanguages: (() => {
+            const picked = formData.getAll("releaseLanguages");
+            // Empty selection defaults to "any" so we never send an empty
+            // filter to the backend accidentally.
+            return picked.length === 0 ? ["any"] : picked;
+          })(),
           debridService: formData.get("debridService"),
           debridApiKey: formData.get("debridApiKey"),
           putioClientId: formData.get("putioClientId"),
