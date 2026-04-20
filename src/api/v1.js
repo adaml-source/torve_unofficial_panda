@@ -20,7 +20,16 @@ import {
 } from "../config/config-token.js";
 import {
   createDefaultConfig,
-  sanitizeConfig
+  DEBRID_SERVICES,
+  DOWNLOAD_CLIENTS,
+  NZB_INDEXERS,
+  QUALITY_OPTIONS,
+  QUALITY_PROFILES,
+  RELEASE_LANGUAGES,
+  RESULT_LIMITS,
+  sanitizeConfig,
+  SORT_OPTIONS,
+  USENET_PROVIDERS
 } from "../config/schema.js";
 import {
   deleteConfig,
@@ -110,6 +119,35 @@ export async function tryHandleV1(request, response, url, providers) {
   // GET /api/v1/providers
   if (request.method === "GET" && url.pathname === "/api/v1/providers") {
     sendV1Json(response, 200, { providers: publicProviderList() });
+    return true;
+  }
+
+  // GET /api/v1/schema — enum options + field requirements for each
+  // download client. Clients (Torve Android/iOS/TV) should read this to
+  // populate dropdowns instead of hardcoding the lists, so Panda can add new
+  // options (e.g. a new NZB cloud service) without an app release.
+  if (request.method === "GET" && url.pathname === "/api/v1/schema") {
+    sendV1Json(response, 200, {
+      debridServices: DEBRID_SERVICES,
+      usenetProviders: USENET_PROVIDERS,
+      nzbIndexers: NZB_INDEXERS,
+      downloadClients: DOWNLOAD_CLIENTS,
+      qualityOptions: QUALITY_OPTIONS,
+      qualityProfiles: QUALITY_PROFILES,
+      releaseLanguages: RELEASE_LANGUAGES,
+      sortOptions: SORT_OPTIONS,
+      resultLimits: RESULT_LIMITS,
+      // Per-download-client field requirements: which of
+      // {url, username, password, apiKey} the client should collect.
+      downloadClientFields: {
+        none:       { fields: [] },
+        nzbget:     { fields: ["url", "username", "password"] },
+        sabnzbd:    { fields: ["url", "apiKey"] },
+        premiumize: { fields: ["apiKey"], cloud: true },
+        torbox:     { fields: ["apiKey"], cloud: true },
+        alldebrid:  { fields: ["apiKey"], cloud: true },
+      },
+    });
     return true;
   }
 
