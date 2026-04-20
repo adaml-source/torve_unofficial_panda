@@ -471,9 +471,20 @@ async function searchEasynews(config, mediaType, mediaId, baseUrl) {
         title: `${fileName}\n📺 ${resolution} 💾 ${size} ⚙️ ${codec || "-"}`,
         url: streamUrl,
         behaviorHints: {
+          // Keep these explicit — the Torve Android app uses them to decide
+          // between in-app ExoPlayer playback (good for HTTPS URLs, handles
+          // Range correctly) and an ACTION_VIEW intent chooser (which may
+          // hand the URL to Samsung Video Player, which rejects HTTPS with
+          // "No content provider"). notWebReady=false + proxyHeaders present
+          // signals "web-ready stream, play in-app".
+          notWebReady: false,
           bingeGroup: `easynews${qualityLabel ? "-" + qualityLabel : ""}`,
           filename: fileName,
           videoSize: item.rawSize,
+          proxyHeaders: {
+            request: {},
+            response: {},
+          },
         },
       };
     });

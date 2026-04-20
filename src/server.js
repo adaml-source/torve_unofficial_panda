@@ -387,9 +387,14 @@ const server = http.createServer(async (request, response) => {
       // Forward Range header so clients can seek. Only attach Basic auth when
       // we're hitting the canonical /dl/ endpoint — the signed CDN URL is
       // self-authenticating and rejects extraneous Authorization headers.
+      //
+      // Easynews's CDN returns HTTP 400 if no Range header is present on GET
+      // requests for large files. ExoPlayer's initial GET may not send one,
+      // so inject `bytes=0-` when the client didn't specify a range. This
+      // lets the upstream succeed and the full response stream flows through.
       const fwdHeaders = {};
       if (!cachedCdnUrl) fwdHeaders["Authorization"] = `Basic ${auth}`;
-      if (request.headers["range"]) fwdHeaders["Range"] = request.headers["range"];
+      fwdHeaders["Range"] = request.headers["range"] || "bytes=0-";
       if (request.headers["user-agent"]) fwdHeaders["User-Agent"] = request.headers["user-agent"];
 
       try {
