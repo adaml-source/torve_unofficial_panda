@@ -1,4 +1,5 @@
 import { TtlCache } from "../lib/ttl-cache.js";
+import { isCloudDownloadClient, resolveNzbViaDebrid } from "./nzb-cloud.js";
 
 // Shared cache for upstream query responses. Keyed per-user so one user's
 // auth failure doesn't poison another user's results.
@@ -41,6 +42,18 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT) 
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Infer a Torrentio-style quality label from a filename. Used for cloud-NZB
+// stream entries where we don't have Easynews's structured height field.
+function detectQualityFromName(name) {
+  if (!name) return "";
+  const n = name.toLowerCase();
+  if (/\b(2160p|4k|uhd)\b/.test(n)) return "4k";
+  if (/\b1080p\b/.test(n)) return "1080p";
+  if (/\b720p\b/.test(n)) return "720p";
+  if (/\b480p\b/.test(n)) return "480p";
+  return "";
 }
 
 function formatFileSize(bytes) {
@@ -538,14 +551,49 @@ async function searchNewznab(config, mediaType, mediaId) {
       { pickTtl: (v) => (v.length > 0 ? CACHE_TTL_HIT : CACHE_TTL_MISS) },
     );
 
-    return items.slice(0, 15).map((item) => {
+    const kept = items.slice(0, 15);
+    const indexerName = config.nzbIndexer === "custom" ? "NZB" : config.nzbIndexer.toUpperCase();
+
+    // If the user has a cloud NZB client configured, try to resolve each NZB
+    // to a direct stream URL. Unresolved entries (not cached / still
+    // downloading) are dropped — the app would fail to play them anyway.
+    if (isCloudDownloadClient(config.downloadClient) && config.downloadClientApiKey) {
+      const resolved = await Promise.all(
+        kept.map(async (item) => {
+          const title = item.title || "Unknown";
+          const nzbUrl = item.link || item.enclosure?.["@attributes"]?.url || "";
+          const sizeBytes = Number(item.enclosure?.["@attributes"]?.length) || 0;
+          if (!nzbUrl) return null;
+          const stream = await resolveNzbViaDebrid(config, nzbUrl, title).catch(() => null);
+          if (!stream?.url) return null;
+          const displaySize = formatFileSize(stream.size || sizeBytes);
+          const qualityLabel = detectQualityFromName(stream.filename || title);
+          return {
+            name: qualityLabel
+              ? `${indexerName}+${config.downloadClient}\n${qualityLabel}`
+              : `${indexerName}+${config.downloadClient}`,
+            title: `${stream.filename || title}\n💾 ${displaySize}`,
+            url: stream.url,
+            behaviorHints: {
+              notWebReady: false,
+              bingeGroup: `usenet-${config.downloadClient}`,
+              filename: stream.filename || title,
+              videoSize: stream.size || sizeBytes,
+            },
+          };
+        }),
+      );
+      return resolved.filter(Boolean);
+    }
+
+    // Local download client (nzbget/sabnzbd) or "none" — return raw NZB URLs.
+    // The app will hand these off to the user's configured download client.
+    return kept.map((item) => {
       const title = item.title || "Unknown";
       const nzbUrl = item.link || item.enclosure?.["@attributes"]?.url || "";
       const size = item.enclosure?.["@attributes"]?.length
         ? formatFileSize(Number(item.enclosure["@attributes"].length))
         : "";
-      const indexerName = config.nzbIndexer === "custom" ? "NZB" : config.nzbIndexer.toUpperCase();
-
       return {
         name: `${indexerName} (NZB)`,
         title: [title, size].filter(Boolean).join(" | "),

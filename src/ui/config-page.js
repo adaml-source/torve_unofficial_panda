@@ -40,7 +40,7 @@ export function renderConfigPage({
   resultLimits,
   usenetProviders = ["none", "easynews", "generic"],
   nzbIndexers = ["none", "nzbgeek", "scenenzbs", "dognzb", "nzbplanet", "custom"],
-  downloadClients = ["none", "nzbget", "sabnzbd"]
+  downloadClients = ["none", "nzbget", "sabnzbd", "premiumize", "torbox", "alldebrid"]
 }) {
   return `<!doctype html>
 <html lang="en">
@@ -606,23 +606,30 @@ export function renderConfigPage({
 
             <!-- Download client -->
             <h3 style="font-size:13px;margin-top:20px;margin-bottom:8px">Download client (optional)</h3>
-            <p class="help" style="margin-bottom:10px">Only needed if you self-host NZBget or SABnzbd and want Panda to send NZBs to it directly.</p>
+            <p class="help" style="margin-bottom:10px">
+              Local clients (NZBget / SABnzbd) write files to a machine you control.<br>
+              Cloud clients (Premiumize / TorBox / AllDebrid) download on the provider's servers and give Panda a streaming URL — no local storage required.
+            </p>
             <div class="grid">
               <label class="field">
                 <span>Client</span>
                 <select name="downloadClient" id="downloadClient">${optionTags(downloadClients, config.downloadClient)}</select>
               </label>
-              <label class="field" id="downloadClientUrl-field" style="${(config.downloadClient && config.downloadClient !== "none") ? "" : "display:none"}">
+              <label class="field" id="downloadClientUrl-field" style="${(config.downloadClient === "nzbget" || config.downloadClient === "sabnzbd") ? "" : "display:none"}">
                 <span>Client URL</span>
                 <input type="text" name="downloadClientUrl" value="${config.downloadClientUrl || ""}" placeholder="http://10.0.0.5:6789" autocomplete="off">
               </label>
-              <label class="field" id="downloadClientAuth-field" style="${(config.downloadClient && config.downloadClient !== "none") ? "" : "display:none"}">
+              <label class="field" id="downloadClientAuth-field" style="${config.downloadClient === "nzbget" ? "" : "display:none"}">
                 <span>Username (optional)</span>
                 <input type="text" name="downloadClientUsername" value="${config.downloadClientUsername || ""}" autocomplete="off">
               </label>
-              <label class="field" id="downloadClientAuthPw-field" style="${(config.downloadClient && config.downloadClient !== "none") ? "" : "display:none"}">
-                <span>Password or API key</span>
+              <label class="field" id="downloadClientAuthPw-field" style="${config.downloadClient === "nzbget" ? "" : "display:none"}">
+                <span>Password</span>
                 <input type="password" name="downloadClientPassword" value="${config.downloadClientPassword || ""}" autocomplete="off">
+              </label>
+              <label class="field" id="downloadClientApiKey-field" style="${(config.downloadClient === "sabnzbd" || config.downloadClient === "premiumize" || config.downloadClient === "torbox" || config.downloadClient === "alldebrid") ? "" : "display:none"}">
+                <span>API key</span>
+                <input type="password" name="downloadClientApiKey" value="${config.downloadClientApiKey || ""}" autocomplete="off">
               </label>
             </div>
           </div>
@@ -685,6 +692,7 @@ export function renderConfigPage({
       const dlUrlField = document.getElementById("downloadClientUrl-field");
       const dlAuthField = document.getElementById("downloadClientAuth-field");
       const dlAuthPwField = document.getElementById("downloadClientAuthPw-field");
+      const dlApiKeyField = document.getElementById("downloadClientApiKey-field");
 
       function syncUsenet() {
         usenetFields.style.display = enableUsenet.checked ? "" : "none";
@@ -697,10 +705,14 @@ export function renderConfigPage({
         nzbIndexerApiKeyField.style.display = nzbEnabled ? "" : "none";
 
         const dl = downloadClientSel.value;
-        const dlEnabled = dl && dl !== "none";
-        dlUrlField.style.display = dlEnabled ? "" : "none";
-        dlAuthField.style.display = dlEnabled ? "" : "none";
-        dlAuthPwField.style.display = dlEnabled ? "" : "none";
+        const isLocal = dl === "nzbget" || dl === "sabnzbd";
+        const isCloud = dl === "premiumize" || dl === "torbox" || dl === "alldebrid";
+        // Local (self-hosted) clients need a URL. Only NZBget has a Username +
+        // Password field. Both SABnzbd and cloud clients use an API key.
+        dlUrlField.style.display = isLocal ? "" : "none";
+        dlAuthField.style.display = dl === "nzbget" ? "" : "none";
+        dlAuthPwField.style.display = dl === "nzbget" ? "" : "none";
+        dlApiKeyField.style.display = (dl === "sabnzbd" || isCloud) ? "" : "none";
       }
 
       enableUsenet.addEventListener("change", syncUsenet);
@@ -743,7 +755,8 @@ export function renderConfigPage({
           downloadClient: formData.get("downloadClient") || "none",
           downloadClientUrl: formData.get("downloadClientUrl") || "",
           downloadClientUsername: formData.get("downloadClientUsername") || "",
-          downloadClientPassword: formData.get("downloadClientPassword") || ""
+          downloadClientPassword: formData.get("downloadClientPassword") || "",
+          downloadClientApiKey: formData.get("downloadClientApiKey") || ""
         };
 
         const response = await fetch("/api/configs", {

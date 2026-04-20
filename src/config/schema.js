@@ -36,7 +36,12 @@ export const RESULT_LIMITS = ["5", "10", "15", "20"];
 
 export const USENET_PROVIDERS = ["none", "easynews", "generic"];
 export const NZB_INDEXERS = ["none", "nzbgeek", "scenenzbs", "dognzb", "nzbplanet", "custom"];
-export const DOWNLOAD_CLIENTS = ["none", "nzbget", "sabnzbd"];
+// Local download clients (nzbget/sabnzbd) write files to disk on the host
+// they run on. Cloud clients (premiumize/torbox/alldebrid) download on the
+// provider's infrastructure and return streaming URLs, so Panda writes
+// nothing locally — the NZB path behaves like a debrid-backed stream.
+export const DOWNLOAD_CLIENTS = ["none", "nzbget", "sabnzbd", "premiumize", "torbox", "alldebrid"];
+export const DOWNLOAD_CLIENT_IS_CLOUD = new Set(["premiumize", "torbox", "alldebrid"]);
 
 const DEFAULT_PROVIDER_IDS = [
   "yts",
