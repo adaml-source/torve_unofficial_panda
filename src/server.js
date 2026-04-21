@@ -16,6 +16,7 @@ import {
   USENET_PROVIDERS
 } from "./config/schema.js";
 import { getConfigRecord, redactConfigSecrets, saveConfig, stripRedactionMarkers } from "./config/config-store.js";
+import { auditLog } from "./lib/audit.js";
 import { getProviderRegistry } from "./providers/provider-registry.js";
 import { buildStreams } from "./streams/pipeline.js";
 import { getCachedEasynewsCdnUrl } from "./providers/usenet-adapter.js";
@@ -336,6 +337,7 @@ const server = http.createServer(async (request, response) => {
       const mgmtHash = crypto.createHash("sha256").update(mgmtRaw).digest("hex");
       const record = await saveConfig(config, { managementTokenHash: mgmtHash });
       const token = await encodeConfigToken(record.id, record.manifestTokenVersion || 1);
+      auditLog(request, { action: "config_create", configId: record.id, extra: { via: "legacy_web_form" } });
 
       sendJson(response, 200, {
         token,

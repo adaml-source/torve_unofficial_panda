@@ -42,6 +42,7 @@ import {
   updateConfig
 } from "../config/config-store.js";
 import { encryptSecret } from "../lib/crypto.js";
+import { auditLog } from "../lib/audit.js";
 import crypto from "node:crypto";
 
 /**
@@ -249,11 +250,22 @@ export async function tryHandleV1(request, response, url, providers) {
   // and issues a new one. Use this when a stream URL has leaked.
   if (request.method === "POST" && url.pathname === "/api/v1/configs/me/rotate-manifest") {
     const mgmt = await resolveManagementAuth(request);
-    if (!mgmt) return sendV1Error(response, 401, "unauthorized", "Management token required");
+    if (!mgmt) {
+      auditLog(request, { action: "rotate_manifest", success: false, errorCode: "unauthorized" });
+      return sendV1Error(response, 401, "unauthorized", "Management token required");
+    }
     const nextVersion = await rotateManifestTokenVersion(mgmt.configId);
-    if (!nextVersion) return sendV1Error(response, 404, "not_found", "Config not found");
+    if (!nextVersion) {
+      auditLog(request, { action: "rotate_manifest", configId: mgmt.configId, success: false, errorCode: "not_found" });
+      return sendV1Error(response, 404, "not_found", "Config not found");
+    }
     const token = await encodeConfigToken(mgmt.configId, nextVersion);
     const baseUrl = `${request.headers["x-forwarded-proto"] || "http"}://${request.headers.host}`;
+    auditLog(request, {
+      action: "rotate_manifest", configId: mgmt.configId,
+      authMethod: mgmt.usedLegacyAuth ? "legacy" : "management",
+      extra: { new_version: nextVersion },
+    });
     return sendV1Json(response, 200, {
       config_id: mgmt.configId,
       panda_token: token,
@@ -268,10 +280,20 @@ export async function tryHandleV1(request, response, url, providers) {
   // never had one.
   if (request.method === "POST" && url.pathname === "/api/v1/configs/me/rotate-management") {
     const mgmt = await resolveManagementAuth(request);
-    if (!mgmt) return sendV1Error(response, 401, "unauthorized", "Management token required");
+    if (!mgmt) {
+      auditLog(request, { action: "rotate_management", success: false, errorCode: "unauthorized" });
+      return sendV1Error(response, 401, "unauthorized", "Management token required");
+    }
     const next = newManagementToken();
     const ok = await setManagementTokenHash(mgmt.configId, next.hash);
-    if (!ok) return sendV1Error(response, 404, "not_found", "Config not found");
+    if (!ok) {
+      auditLog(request, { action: "rotate_management", configId: mgmt.configId, success: false, errorCode: "not_found" });
+      return sendV1Error(response, 404, "not_found", "Config not found");
+    }
+    auditLog(request, {
+      action: "rotate_management", configId: mgmt.configId,
+      authMethod: mgmt.usedLegacyAuth ? "legacy" : "management",
+    });
     return sendV1Json(response, 200, {
       config_id: mgmt.configId,
       management_token: next.raw,
@@ -389,6 +411,7 @@ async function handleCreateConfig(request, response, providers) {
   const record = await saveConfig(config, { managementTokenHash: mgmt.hash });
   const token = await encodeConfigToken(record.id, record.manifestTokenVersion || 1);
   const baseUrl = `${request.headers["x-forwarded-proto"] || "http"}://${request.headers.host}`;
+  auditLog(request, { action: "config_create", configId: record.id });
   return sendV1Json(response, 200, {
     config_id: record.id,
     panda_token: token,
@@ -430,16 +453,24 @@ async function handleConfigMe(request, response, providers) {
 
   const mgmt = await resolveManagementAuth(request);
   if (!mgmt) {
+    auditLog(request, {
+      action: request.method === "DELETE" ? "config_delete" : "config_patch",
+      success: false, errorCode: "unauthorized",
+    });
     return sendV1Error(
       response, 401, "unauthorized",
       "This operation requires the management token. Send `Authorization: Bearer <management_token>` plus `X-Panda-Config-Id: <config_id>`.",
     );
   }
   const { configId, record, usedLegacyAuth } = mgmt;
+  const authMethod = usedLegacyAuth ? "legacy" : "management";
 
   if (request.method === "PATCH") {
     const body = await readJsonBody(request);
-    if (body == null) return sendV1Error(response, 400, "invalid_json", "Body must be JSON");
+    if (body == null) {
+      auditLog(request, { action: "config_patch", configId, authMethod, success: false, errorCode: "invalid_json" });
+      return sendV1Error(response, 400, "invalid_json", "Body must be JSON");
+    }
     // Clients that re-send the last GET response will include "[redacted]"
     // for every secret (see redactConfigSecrets). Restore the real stored
     // value for any field the client didn't deliberately replace.
@@ -457,6 +488,13 @@ async function handleConfigMe(request, response, providers) {
       nextConfig.debridApiKey = record.config.debridApiKey;
     }
     const updated = await updateConfig(configId, nextConfig);
+    // fields_changed records which top-level keys the body attempted to
+    // overwrite — useful for ops (detect an account being tampered with)
+    // without ever logging the values themselves.
+    auditLog(request, {
+      action: "config_patch", configId, authMethod,
+      fieldsChanged: Object.keys(body || {}).filter((k) => k !== "integration_type"),
+    });
     return sendV1Json(response, 200, {
       config_id: configId,
       config: redactConfigSecrets(updated.config),
@@ -467,6 +505,7 @@ async function handleConfigMe(request, response, providers) {
 
   if (request.method === "DELETE") {
     await deleteConfig(configId);
+    auditLog(request, { action: "config_delete", configId, authMethod });
     return sendV1Json(response, 200, { deleted: true });
   }
 

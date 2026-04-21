@@ -113,9 +113,47 @@ function sanitizeBoolean(value, fallback) {
   return typeof value === "boolean" ? value : fallback;
 }
 
-function sanitizeString(value) {
-  return typeof value === "string" ? value.trim() : "";
+// Defense against:
+//   - gigantic values exhausting DB / memory (length caps)
+//   - control characters that break loggers, auth headers, or HTTP framing
+//   - null bytes that could truncate downstream parsers
+const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g; // keep \t, \n, \r in stringy fields
+const DEFAULT_MAX_LENGTH = 2000;
+
+function sanitizeString(value, maxLength = DEFAULT_MAX_LENGTH) {
+  if (typeof value !== "string") return "";
+  const stripped = value.replace(CONTROL_CHARS, "");
+  const trimmed = stripped.trim();
+  return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
 }
+
+/**
+ * Sanitise a user-provided URL. Returns "" for anything that isn't a syntactically
+ * valid http(s) URL — prevents javascript:, data:, file:, etc. from sneaking
+ * into a downloadClientUrl / nzbIndexerUrl that will later be hit server-side.
+ */
+function sanitizeHttpUrl(value, { requireHttps = false } = {}) {
+  const trimmed = sanitizeString(value);
+  if (!trimmed) return "";
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    if (requireHttps && u.protocol !== "https:") return "";
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
+// Per-field length caps. Stricter than the DEFAULT_MAX_LENGTH for fields with
+// known realistic bounds — keeps the attack surface small.
+const LIMITS = {
+  username: 255,
+  password: 255,
+  apiKey: 512,
+  url: 2000,
+  identifier: 255,
+};
 
 export function sanitizeConfig(input, knownProviders) {
   const defaults = createDefaultConfig();
@@ -152,11 +190,11 @@ export function sanitizeConfig(input, knownProviders) {
     debridService: DEBRID_SERVICES.includes(input?.debridService)
       ? input.debridService
       : defaults.debridService,
-    debridApiKey: sanitizeString(input?.debridApiKey),
+    debridApiKey: sanitizeString(input?.debridApiKey, LIMITS.apiKey),
     debridCredentialCiphertext: typeof input?.debridCredentialCiphertext === "string" ? input.debridCredentialCiphertext : "",
     debridCredentialSource: typeof input?.debridCredentialSource === "string" ? input.debridCredentialSource : "",
-    debridDisplayIdentifier: sanitizeString(input?.debridDisplayIdentifier),
-    putioClientId: sanitizeString(input?.putioClientId),
+    debridDisplayIdentifier: sanitizeString(input?.debridDisplayIdentifier, LIMITS.identifier),
+    putioClientId: sanitizeString(input?.putioClientId, LIMITS.apiKey),
     groupByQuality: sanitizeBoolean(input?.groupByQuality, defaults.groupByQuality),
     sortTorrentsBy: SORT_OPTIONS.includes(input?.sortTorrentsBy)
       ? input.sortTorrentsBy
@@ -172,38 +210,38 @@ export function sanitizeConfig(input, knownProviders) {
     usenetProvider: USENET_PROVIDERS.includes(input?.usenetProvider)
       ? input.usenetProvider
       : defaults.usenetProvider,
-    usenetHost: sanitizeString(input?.usenetHost),
+    usenetHost: sanitizeString(input?.usenetHost, LIMITS.identifier),
     usenetPort: sanitizeInt(input?.usenetPort, 1, 65535, defaults.usenetPort),
-    usenetUsername: sanitizeString(input?.usenetUsername),
-    usenetPassword: sanitizeString(input?.usenetPassword),
+    usenetUsername: sanitizeString(input?.usenetUsername, LIMITS.username),
+    usenetPassword: sanitizeString(input?.usenetPassword, LIMITS.password),
     usenetSSL: sanitizeBoolean(input?.usenetSSL, defaults.usenetSSL),
     usenetConnections: sanitizeInt(input?.usenetConnections, 1, 50, defaults.usenetConnections),
     nzbIndexer: NZB_INDEXERS.includes(input?.nzbIndexer)
       ? input.nzbIndexer
       : defaults.nzbIndexer,
-    nzbIndexerUrl: sanitizeString(input?.nzbIndexerUrl),
-    nzbIndexerApiKey: sanitizeString(input?.nzbIndexerApiKey),
+    nzbIndexerUrl: sanitizeHttpUrl(input?.nzbIndexerUrl),
+    nzbIndexerApiKey: sanitizeString(input?.nzbIndexerApiKey, LIMITS.apiKey),
     // Multi-indexer array. Each entry: { type, url, apiKey }. url is only
     // meaningful when type === "custom". Drop rows with type === "none" and
     // rows missing an API key. Fall back to the legacy single-indexer fields
     // when the array is empty, so existing configs upgrade without editing.
     nzbIndexers: (() => {
-      const raw = Array.isArray(input?.nzbIndexers) ? input.nzbIndexers : [];
+      const raw = Array.isArray(input?.nzbIndexers) ? input.nzbIndexers.slice(0, 10) : [];
       const cleaned = raw
         .map((r) => r && typeof r === "object"
           ? {
               type: NZB_INDEXERS.includes(r.type) && r.type !== "none" ? r.type : null,
-              url: sanitizeString(r.url),
-              apiKey: sanitizeString(r.apiKey),
+              url: sanitizeHttpUrl(r.url),
+              apiKey: sanitizeString(r.apiKey, LIMITS.apiKey),
             }
           : null)
         .filter((r) => r && r.type && r.apiKey);
       if (cleaned.length > 0) return cleaned;
       // Legacy upgrade path
       const legacyType = NZB_INDEXERS.includes(input?.nzbIndexer) ? input.nzbIndexer : "none";
-      const legacyKey = sanitizeString(input?.nzbIndexerApiKey);
+      const legacyKey = sanitizeString(input?.nzbIndexerApiKey, LIMITS.apiKey);
       if (legacyType !== "none" && legacyKey) {
-        return [{ type: legacyType, url: sanitizeString(input?.nzbIndexerUrl), apiKey: legacyKey }];
+        return [{ type: legacyType, url: sanitizeHttpUrl(input?.nzbIndexerUrl), apiKey: legacyKey }];
       }
       return [];
     })(),
@@ -211,9 +249,9 @@ export function sanitizeConfig(input, knownProviders) {
     downloadClient: DOWNLOAD_CLIENTS.includes(input?.downloadClient)
       ? input.downloadClient
       : defaults.downloadClient,
-    downloadClientUrl: sanitizeString(input?.downloadClientUrl),
-    downloadClientUsername: sanitizeString(input?.downloadClientUsername),
-    downloadClientPassword: sanitizeString(input?.downloadClientPassword),
-    downloadClientApiKey: sanitizeString(input?.downloadClientApiKey),
+    downloadClientUrl: sanitizeHttpUrl(input?.downloadClientUrl),
+    downloadClientUsername: sanitizeString(input?.downloadClientUsername, LIMITS.username),
+    downloadClientPassword: sanitizeString(input?.downloadClientPassword, LIMITS.password),
+    downloadClientApiKey: sanitizeString(input?.downloadClientApiKey, LIMITS.apiKey),
   };
 }
