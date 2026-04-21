@@ -301,6 +301,63 @@ export async function tryHandleV1(request, response, url, providers) {
     });
   }
 
+  // GET /api/v1/configs/me/export — full config dump including every stored
+  // credential in plaintext. For GDPR data-portability requests and for users
+  // who want a local backup of their setup. Management-token-only — reading
+  // your own raw debrid API key is the most sensitive operation in the API,
+  // so a leaked manifest URL must not be able to trigger it.
+  if (request.method === "GET" && url.pathname === "/api/v1/configs/me/export") {
+    const mgmt = await resolveManagementAuth(request);
+    if (!mgmt) {
+      auditLog(request, { action: "config_export", success: false, errorCode: "unauthorized" });
+      return sendV1Error(response, 401, "unauthorized", "Management token required");
+    }
+    auditLog(request, {
+      action: "config_export", configId: mgmt.configId,
+      authMethod: mgmt.usedLegacyAuth ? "legacy" : "management",
+    });
+    // No redaction here — the point is to give the owner their data back.
+    // Content-Disposition header makes browsers save it as a file.
+    response.setHeader("content-disposition", `attachment; filename="panda-config-${mgmt.configId}.json"`);
+    return sendV1Json(response, 200, {
+      exported_at: new Date().toISOString(),
+      config_id: mgmt.configId,
+      config: mgmt.record.config,
+      created_at: mgmt.record.createdAt,
+      updated_at: mgmt.record.updatedAt,
+      notice: "This file contains your raw debrid API keys, Usenet password, and any other credentials you've provided. Treat it like a password file — do not commit to a repo, do not email, do not share.",
+    });
+  }
+
+  // POST /api/v1/configs/me/purge — hard delete + audit-log scrub for GDPR
+  // right-to-be-forgotten requests. Beyond a normal DELETE, this also strips
+  // the config_id from every audit log entry for that config so no residual
+  // trace of the customer's activity remains. Keep the log rows themselves
+  // (for aggregate forensic value) but null out the config_id / IP / UA.
+  if (request.method === "POST" && url.pathname === "/api/v1/configs/me/purge") {
+    const mgmt = await resolveManagementAuth(request);
+    if (!mgmt) {
+      auditLog(request, { action: "config_purge", success: false, errorCode: "unauthorized" });
+      return sendV1Error(response, 401, "unauthorized", "Management token required");
+    }
+    const configId = mgmt.configId;
+    await deleteConfig(configId);
+    // Emit the audit event FIRST so the scrub also scrubs it — a purge is
+    // itself a thing that happened, but if we logged it after, we'd leave
+    // a trailing record of the very event we're trying to erase.
+    auditLog(request, {
+      action: "config_purge", configId, authMethod: mgmt.usedLegacyAuth ? "legacy" : "management",
+    });
+    try {
+      const { purgeAuditLogForConfig } = await import("../lib/audit.js");
+      const purged = await purgeAuditLogForConfig(configId);
+      return sendV1Json(response, 200, { deleted: true, audit_entries_scrubbed: purged });
+    } catch (err) {
+      // Config is gone either way; audit scrub failure is non-fatal.
+      return sendV1Json(response, 200, { deleted: true, audit_entries_scrubbed: null, audit_scrub_error: err.message });
+    }
+  }
+
   sendV1Error(response, 404, "not_found", "Unknown /api/v1 endpoint");
   return true;
 }

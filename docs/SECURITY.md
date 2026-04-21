@@ -141,6 +141,60 @@ minimum: rotate `PANDA_ENCRYPTION_KEY`, rotate `PANDA_SECRET`
 tokens, email every customer, review `/var/log/panda/audit.log`
 for the last 90 days, file incident report.
 
+## GDPR / data subject rights
+
+Panda exposes two endpoints for GDPR compliance, both requiring
+management-token auth (so only the config owner can trigger them):
+
+### Data export — Article 20 (right to portability)
+
+```
+GET /api/v1/configs/me/export
+Authorization: Bearer <management_token>
+X-Panda-Config-Id: <config_id>
+```
+
+Returns the full config as JSON with every credential in **plaintext**.
+The response includes a `Content-Disposition` header so browsers save
+the result as a file. No redaction — the whole point is that the user
+gets their own data back.
+
+### Purge — Article 17 (right to erasure)
+
+```
+POST /api/v1/configs/me/purge
+Authorization: Bearer <management_token>
+X-Panda-Config-Id: <config_id>
+```
+
+Harder delete than the standard `DELETE` endpoint:
+
+- Deletes the config row (same as `DELETE`).
+- **Additionally scrubs the audit log**: every prior entry for this
+  `config_id` has its `config_id`, `ip`, and `user_agent` fields set
+  to `null`. Timestamps and action types remain — they have aggregate
+  forensic value but no linkage to the erased customer.
+- The purge event itself is emitted BEFORE the scrub, so its own audit
+  line is also scrubbed — the erasure is the last thing we know
+  happened involving that customer's config.
+
+Keep a record (in a system separate from Panda) that the purge was
+performed — GDPR may require you to prove an erasure was executed
+without keeping anything identifying.
+
+### What Panda processes as personal data
+
+- **Credentials**: debrid API keys, Usenet passwords, indexer keys,
+  download-client creds. Encrypted at rest, transmitted over HTTPS.
+- **Behavior metadata**: which content IDs (IMDb tt-IDs) a customer
+  opens — implicit in stream requests, NOT stored. Passed to upstream
+  providers (Easynews, SCENENZBS) per-request and forgotten.
+- **Audit metadata**: IP, user-agent, timestamps for config create /
+  edit / delete. Retained 12 weeks then rotated out.
+
+Nothing else. Panda does not store email, name, physical address, or
+any catalogue / preference history.
+
 ## Backups
 
 **`panda.db` and `.env` must both be backed up.** Losing `.env` =
