@@ -1,8 +1,14 @@
 # Panda
 
-Panda is a standalone addon service for Torve.
+Panda is a standalone, open-source (MIT-licensed) addon service for
+[Torve](https://torve.app). It is consumed by a wrapping user-facing
+service — the reference deployment is Torve, but nothing in the design
+is Torve-specific. Anyone can self-host Panda or integrate it into
+another Stremio-compatible client.
 
-Its job is to make streaming setup easier for non-power users while still leaving room for advanced users to customize providers, debrid backends, quality policy, and source behavior.
+Its job is to make streaming setup easier for non-power users while
+still leaving room for advanced users to customize providers, debrid
+backends, quality policy, and source behavior.
 
 ## Current v1 shape
 
@@ -87,20 +93,19 @@ Saved configs are stored in `.data/configs.json`.
 
 ## Security model
 
-Panda follows a simple but safer model than raw manifest configuration links:
+See [`docs/SECURITY.md`](docs/SECURITY.md) for the full threat model,
+token architecture, encryption scheme, audit log, backup strategy, and
+incident response playbooks.
 
-1. the user configures Panda through `/configure`
-2. Panda stores the config and any debrid secret server-side
-3. Panda returns a signed addon token
-4. the manifest URL references only that signed token
-5. stream requests resolve the stored config server-side and proxy Torrentio
+Headline properties:
 
-This is still an early implementation and does not yet include a database, auth layer, or encryption-at-rest, but it is already materially better than embedding debrid secrets into a public manifest URL.
+- AES-256-GCM at rest for every stored credential
+- Two separate tokens per config (manifest for streams, management for
+  edits) — a leaked stream URL cannot steal or modify credentials
+- Rotation endpoints for both tokens
+- GDPR data-export and erasure endpoints
+- Audit log at `/var/log/panda/audit.log` with 12-week retention
 
-## Next milestones
+## License
 
-1. Add a proper persistent backend store instead of local JSON files.
-2. Add config editing and account-specific management flows.
-3. Add more upstream adapters beyond Torrentio.
-4. Add catalogs, metadata, and subtitle expansion where useful.
-5. Deploy Panda to a stable public domain and point Torve defaults at it.
+MIT. See [`LICENSE`](LICENSE).

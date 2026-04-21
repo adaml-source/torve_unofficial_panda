@@ -1,9 +1,27 @@
 # Panda Security Model
 
-Panda stores third-party service credentials (debrid API keys, Usenet
-passwords, NZB indexer keys, cloud-download-client keys) on behalf of
-end users. This document is the internal reference for how that's
-protected and how to respond when something goes wrong.
+Panda is open-source addon infrastructure (MIT licensed). It is consumed
+by a wrapping user-facing service — in the reference deployment this is
+Torve, but the design does not require Torve. This doc describes the
+security posture Panda gives whoever runs it, and what the wrapping
+service is responsible for.
+
+**Scope split:**
+
+- **Panda's job**: accept third-party service credentials (debrid API
+  keys, Usenet passwords, NZB indexer keys, download-client credentials),
+  store them encrypted at rest, and return a Stremio-compatible manifest
+  URL that produces streaming URLs on demand. No user accounts, no
+  billing, no PII beyond the raw credentials. Two tokens per config
+  (manifest for streams, management for edits).
+- **Wrapping service's job** (Torve, in the reference deployment):
+  end-user authentication, account storage, UX, payments,
+  privacy-policy framing, GDPR data subject rights as surfaced to the
+  end user. The wrapping service is the data controller; Panda is a
+  processor from the wrapping service's point of view.
+
+This document covers Panda. For the wrapping service's policy (how
+Torve presents this to users), see Torve's privacy policy page.
 
 ## Threat model (what we protect against)
 
@@ -143,8 +161,11 @@ for the last 90 days, file incident report.
 
 ## GDPR / data subject rights
 
-Panda exposes two endpoints for GDPR compliance, both requiring
-management-token auth (so only the config owner can trigger them):
+Panda is a data processor, not a controller — the wrapping service
+(Torve) owes GDPR obligations to the end user. Panda exposes two
+endpoints the wrapping service wires into its own data-subject-rights
+flows, both requiring management-token auth (so the wrapping service
+must prove it knows the management token for that specific config):
 
 ### Data export — Article 20 (right to portability)
 
