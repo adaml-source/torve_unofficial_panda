@@ -135,9 +135,15 @@ Full technical detail: [link to SECURITY.md].
 - No advertisers, no analytics providers, no data brokers.
 
 4. WHERE YOUR DATA LIVES
-Servers hosted in [location — e.g. "Germany (Frankfurt)" or "the United
-States (Virginia)"]. By using Panda you consent to transfer of your
-credentials to that jurisdiction.
+Servers are hosted in Germany (data centre: [specific region — ask your
+VPS provider: e.g. "Falkenstein" for Hetzner, "Frankfurt" for Contabo /
+AWS-FRA]). As a German/EU jurisdiction, your data never leaves the EEA
+in the course of normal operation.
+
+If you are located outside the EEA, your credentials are transferred to
+and processed in Germany. This transfer is necessary to provide the
+service (GDPR Art. 49(1)(b): performance of a contract at the request
+of the data subject).
 
 5. YOUR RIGHTS (GDPR / UK DP Act — applicable if you're in EEA/UK)
 - Access: request a copy of everything we hold about your config via
@@ -151,10 +157,22 @@ credentials to that jurisdiction.
 We respond to rights requests within 30 days.
 
 6. SUPERVISORY AUTHORITY
-You can complain to your local data protection authority:
-- EU: [link to EDPB authority lookup]
-- UK: https://ico.org.uk
-- [Other jurisdictions as applicable]
+If you are located in the EU/EEA, you may complain to:
+- Your local data protection authority (list:
+  https://edpb.europa.eu/about-edpb/about-edpb/members_en), OR
+- The competent German supervisory authority for our registered office
+  ([the Landesbeauftragter für den Datenschutz of the German state
+  your business is registered in — e.g. Berlin: Berliner Beauftragte
+  für Datenschutz; Hamburg: HmbBfDI; federal-level cross-border matters:
+  BfDI https://www.bfdi.bund.de]).
+
+If you are located in the UK: Information Commissioner's Office
+(https://ico.org.uk) — applicable only if we specifically market to or
+monitor UK residents (GDPR Art. 3(2) extraterritorial reach).
+
+Users outside the EEA/UK: your credentials are stored in Germany; local
+privacy law in your jurisdiction may provide additional rights we
+accommodate on request.
 
 7. CONTACT
 [DPO email], or [postal address if applicable].
@@ -223,19 +241,51 @@ We sincerely apologize for this incident and for any concern it causes.
 
 ---
 
-## Checklist before going live with paying customers
+## Germany-specific checklist before going live
 
-- [ ] Legal entity registered in your operating jurisdiction
-- [ ] ToS drafted and reviewed by a lawyer
-- [ ] Privacy Policy drafted and reviewed by a lawyer
-- [ ] Privacy Policy linked from every signup / purchase flow
-- [ ] DPO identified (may be you) with a monitored email address
-- [ ] Breach-notification process documented and tested (who does what
-      within 72h)
-- [ ] Backup strategy implemented (see SECURITY.md) and last restore
-      tested
-- [ ] At least one customer communication channel besides "GitHub issue"
-- [ ] Payment processor's data-processing addendum signed (Paddle,
-      Stripe, etc. all have them)
-- [ ] Clear "customers bring their own credentials / accept those
-      services' ToS" language in signup
+Panda's infrastructure is hosted in Germany (EU), which means the
+bulk of GDPR / German-specific compliance items below apply whether
+your legal entity is in Germany or elsewhere in the EEA.
+
+- [ ] **Legal entity registered**. If in Germany: likely UG or GmbH.
+      Single-person self-employed (Einzelunternehmer) works but gives
+      you no liability shield — a determined lawsuit goes straight to
+      your personal assets. Budget ~€500 for a notary to incorporate a
+      UG (mini-GmbH), €25k for a full GmbH.
+- [ ] **Imprint (Impressum)** on your website. German law (§5 TMG)
+      requires a legally-identifying footer on every commercial
+      website with: business name, registered address, contact info,
+      registration number, VAT ID if applicable. Not optional, not
+      waivable. Example template: IHK-Berlin publishes a free one.
+- [ ] **ToS and Privacy Policy reviewed by a lawyer** specialized in
+      German SaaS / data protection (Datenschutz). Look for one on
+      Anwalt.de or via IHK-Vermittlung. €1–3k is realistic.
+- [ ] **Privacy Policy linked from every signup / purchase flow** in a
+      non-dismissible manner.
+- [ ] **Cookie-consent banner** if you run any analytics / marketing
+      pixels. Essential cookies only = no banner required.
+- [ ] **DPO identified and named in the policy.** For a small business
+      under 20 people processing credentials, Germany's BDSG §38
+      typically doesn't require a formal DPO — but you still need a
+      monitored privacy contact address.
+- [ ] **Breach-notification process documented and tested.** 72 hours
+      from detection → notify supervisory authority (BfDI or the state
+      DPA). Template in the "Incident notification template" section
+      above.
+- [ ] **Backup strategy implemented** (see SECURITY.md) and at least
+      one full restore test performed.
+- [ ] **Customer communication channel** besides a GitHub issue tracker.
+      Email is fine. Make sure the address in the imprint / privacy
+      policy actually reaches someone.
+- [ ] **Payment processor DPA signed.** Paddle (serves as the
+      merchant-of-record and handles VAT for you — recommended for a
+      single-founder German entity), Stripe, Mollie — all have DPAs
+      you sign online in 2 minutes.
+- [ ] **Explicit "customers bring their own credentials / accept those
+      services' ToS" language** in your signup, separate from general
+      ToS acceptance.
+- [ ] **AVV (Auftragsverarbeitungsvertrag) with your VPS provider.**
+      German GDPR-aligned version of a DPA. Hetzner, Contabo, IONOS,
+      OVH, Strato all publish one — download, sign electronically,
+      file. Takes 5 minutes; without it you're technically
+      non-compliant from day one.
