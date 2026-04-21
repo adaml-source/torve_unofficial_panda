@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import http from "node:http";
 import { URL } from "node:url";
 import { decodeConfigToken, encodeConfigToken } from "./config/config-token.js";
@@ -195,12 +196,19 @@ async function readJsonBody(request) {
 }
 
 async function getStoredConfigOrNull(token) {
-  const configId = await decodeConfigToken(token);
-  if (!configId) {
-    return null;
-  }
+  const decoded = await decodeConfigToken(token);
+  if (!decoded) return null;
 
-  return await getConfigRecord(configId);
+  const record = await getConfigRecord(decoded.configId);
+  if (!record) return null;
+
+  // Enforce manifest-token rotation: tokens signed before a rotate call
+  // carry a tokenVersion older than the config's current manifestTokenVersion.
+  // Reject them so a leaked manifest URL can be revoked.
+  const currentVersion = record.manifestTokenVersion || 1;
+  if (decoded.tokenVersion !== currentVersion) return null;
+
+  return record;
 }
 
 const server = http.createServer(async (request, response) => {
@@ -322,13 +330,19 @@ const server = http.createServer(async (request, response) => {
       // "[redacted]" markers for every secret. Strip them so sanitizeConfig
       // doesn't store the placeholder literal as the credential.
       const config = sanitizeConfig(stripRedactionMarkers(body), providers);
-      const record = await saveConfig(config);
-      const token = await encodeConfigToken(record.id);
+      // Same two-token model as /api/v1/configs. Management token shown once,
+      // hash persisted. Needed for future PATCH / DELETE / rotate calls.
+      const mgmtRaw = crypto.randomBytes(32).toString("hex");
+      const mgmtHash = crypto.createHash("sha256").update(mgmtRaw).digest("hex");
+      const record = await saveConfig(config, { managementTokenHash: mgmtHash });
+      const token = await encodeConfigToken(record.id, record.manifestTokenVersion || 1);
 
       sendJson(response, 200, {
         token,
         configId: record.id,
-        manifestUrl: `${baseUrl}/u/${token}/manifest.json`
+        manifestUrl: `${baseUrl}/u/${token}/manifest.json`,
+        managementToken: mgmtRaw,
+        managementTokenNotice: "Save this token now — shown only once. Required to edit or delete the config later.",
       });
       return;
     }
@@ -475,10 +489,21 @@ const server = http.createServer(async (request, response) => {
 
     notFound(response);
   } catch (error) {
-    sendJson(response, 500, {
-      error: "internal_error",
-      message: error instanceof Error ? error.message : "Unknown server error"
-    });
+    console.error("Request handler error:", error?.stack || error);
+    // If a streaming handler already wrote headers (common for the easynews
+    // proxy piping Range responses), we can't send a JSON error — just
+    // close the socket and move on. Previously this path throws
+    // ERR_HTTP_HEADERS_SENT and crashes the whole server.
+    if (response.headersSent) {
+      try { response.end(); } catch { /* ignore */ }
+      return;
+    }
+    try {
+      sendJson(response, 500, {
+        error: "internal_error",
+        message: error instanceof Error ? error.message : "Unknown server error"
+      });
+    } catch { /* swallow — already handled as best we can */ }
   }
 });
 

@@ -35,11 +35,35 @@ import {
   deleteConfig,
   getConfigRecord,
   redactConfigSecrets,
+  rotateManifestTokenVersion,
   saveConfig,
+  setManagementTokenHash,
   stripRedactionMarkers,
   updateConfig
 } from "../config/config-store.js";
 import { encryptSecret } from "../lib/crypto.js";
+import crypto from "node:crypto";
+
+/**
+ * Generate a raw management token (opaque 32-byte random, hex encoded) and
+ * its sha256 hash. The raw value is shown to the caller once; only the hash
+ * is persisted, so a DB snapshot doesn't expose working tokens.
+ */
+function newManagementToken() {
+  const raw = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(raw).digest("hex");
+  return { raw, hash };
+}
+
+function hashManagementToken(raw) {
+  return crypto.createHash("sha256").update(String(raw || "")).digest("hex");
+}
+
+function timingSafeHashEqual(a, b) {
+  const ab = Buffer.from(a || "", "hex");
+  const bb = Buffer.from(b || "", "hex");
+  return ab.length === bb.length && ab.length > 0 && crypto.timingSafeEqual(ab, bb);
+}
 import { getProvider, publicProviderList } from "../debrid/providers.js";
 import {
   pollDeviceFlow,
@@ -96,11 +120,56 @@ async function resolveBearer(request) {
   const match = auth.match(/^Bearer\s+(.+)$/i);
   if (!match) return null;
   const token = match[1].trim();
-  const configId = await decodeConfigToken(token);
-  if (!configId) return null;
-  const record = await getConfigRecord(configId);
+  const decoded = await decodeConfigToken(token);
+  if (!decoded) return null;
+  const record = await getConfigRecord(decoded.configId);
   if (!record) return null;
-  return { token, configId, record };
+  // Enforce manifest token rotation — stale token => same result as bad sig.
+  if (decoded.tokenVersion !== (record.manifestTokenVersion || 1)) return null;
+  return { token, configId: decoded.configId, record };
+}
+
+/**
+ * Authorise a mutating operation (PATCH / DELETE / rotate). Accepts:
+ *   - Bearer <management_token>           preferred; compares against the
+ *                                         sha256 hash stored on the config row
+ *   - Bearer <manifest_token>             fallback ONLY for legacy rows that
+ *                                         don't yet have a management token.
+ *                                         Callers should immediately rotate
+ *                                         to provision one.
+ * Returns { record, usedLegacyAuth: boolean } on success, null on failure.
+ */
+async function resolveManagementAuth(request) {
+  const auth = request.headers["authorization"] || "";
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  if (!match) return null;
+  const rawToken = match[1].trim();
+
+  // Try management-token first (opaque hex, no "."), then manifest-token.
+  if (!rawToken.includes(".")) {
+    const incomingHash = hashManagementToken(rawToken);
+    // We don't know which config this belongs to without a scan, so require
+    // the caller to also identify the config via the X-Panda-Config-Id header
+    // OR to present a manifest bearer alongside it.
+    // Simpler: require management tokens to be paired with a manifest bearer
+    // in the X-Panda-Config header. For the v1 flow, the caller already knows
+    // their config_id from the creation response — trust it from a header.
+    const configId = request.headers["x-panda-config-id"];
+    if (!configId || typeof configId !== "string") return null;
+    const record = await getConfigRecord(configId);
+    if (!record || !record.managementTokenHash) return null;
+    if (!timingSafeHashEqual(incomingHash, record.managementTokenHash)) return null;
+    return { record, configId, usedLegacyAuth: false };
+  }
+
+  // Manifest-token fallback path (legacy configs with no management hash yet)
+  const manifestResolved = await resolveBearer(request);
+  if (!manifestResolved) return null;
+  if (manifestResolved.record.managementTokenHash) {
+    // Row already has a management token — manifest bearer no longer auths writes.
+    return null;
+  }
+  return { record: manifestResolved.record, configId: manifestResolved.configId, usedLegacyAuth: true };
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────
@@ -174,6 +243,40 @@ export async function tryHandleV1(request, response, url, providers) {
   if (url.pathname === "/api/v1/configs/me") {
     await handleConfigMe(request, response, providers);
     return true;
+  }
+
+  // POST /api/v1/configs/me/rotate-manifest — revokes the current manifest URL
+  // and issues a new one. Use this when a stream URL has leaked.
+  if (request.method === "POST" && url.pathname === "/api/v1/configs/me/rotate-manifest") {
+    const mgmt = await resolveManagementAuth(request);
+    if (!mgmt) return sendV1Error(response, 401, "unauthorized", "Management token required");
+    const nextVersion = await rotateManifestTokenVersion(mgmt.configId);
+    if (!nextVersion) return sendV1Error(response, 404, "not_found", "Config not found");
+    const token = await encodeConfigToken(mgmt.configId, nextVersion);
+    const baseUrl = `${request.headers["x-forwarded-proto"] || "http"}://${request.headers.host}`;
+    return sendV1Json(response, 200, {
+      config_id: mgmt.configId,
+      panda_token: token,
+      manifest_url: `${baseUrl}/u/${token}/manifest.json`,
+      manifest_token_version: nextVersion,
+    });
+  }
+
+  // POST /api/v1/configs/me/rotate-management — replaces the management token
+  // with a newly-minted one, returned ONCE in the response. Use this when the
+  // management token leaks, or to provision one for a legacy config that
+  // never had one.
+  if (request.method === "POST" && url.pathname === "/api/v1/configs/me/rotate-management") {
+    const mgmt = await resolveManagementAuth(request);
+    if (!mgmt) return sendV1Error(response, 401, "unauthorized", "Management token required");
+    const next = newManagementToken();
+    const ok = await setManagementTokenHash(mgmt.configId, next.hash);
+    if (!ok) return sendV1Error(response, 404, "not_found", "Config not found");
+    return sendV1Json(response, 200, {
+      config_id: mgmt.configId,
+      management_token: next.raw,
+      management_token_notice: "Save this immediately — it's shown only once. Required for future edits / rotations.",
+    });
   }
 
   sendV1Error(response, 404, "not_found", "Unknown /api/v1 endpoint");
@@ -276,30 +379,50 @@ async function handleCreateConfig(request, response, providers) {
   // Create flow has no prior config to merge against; any "[redacted]"
   // placeholders get blanked so sanitizeConfig applies defaults.
   const config = sanitizeConfig(stripRedactionMarkers(body), providers);
-  const record = await saveConfig(config);
-  const token = await encodeConfigToken(record.id);
+  // Issue a management token at creation time. The RAW value is returned once
+  // here and never again; only its sha256 hash is persisted. Callers must
+  // store the raw value securely — losing it means losing edit access to the
+  // config (though the stream URL keeps working, since that's a separate
+  // token). This is the key property that makes a leaked manifest URL
+  // survivable: stream-only, not editable.
+  const mgmt = newManagementToken();
+  const record = await saveConfig(config, { managementTokenHash: mgmt.hash });
+  const token = await encodeConfigToken(record.id, record.manifestTokenVersion || 1);
   const baseUrl = `${request.headers["x-forwarded-proto"] || "http"}://${request.headers.host}`;
   return sendV1Json(response, 200, {
+    config_id: record.id,
     panda_token: token,
     manifest_url: `${baseUrl}/u/${token}/manifest.json`,
+    management_token: mgmt.raw,
+    management_token_notice: "Save this management token now — it's shown only once and is required to edit or delete this config later. Present it as `Authorization: Bearer <token>` with `X-Panda-Config-Id: <config_id>`.",
     expires_at: null
   });
 }
 
 async function handleConfigMe(request, response, providers) {
-  const auth = await resolveBearer(request);
-  if (!auth) {
-    return sendV1Error(response, 401, "unauthorized", "Valid panda_token required");
-  }
-  const { configId, record } = auth;
-
+  // GET is read-only: the manifest token alone suffices. PATCH / DELETE are
+  // mutating and require the management token (sha256-hash-matched) so that a
+  // leaked stream URL can't be used to tamper with credentials.
   if (request.method === "GET") {
+    const auth = await resolveBearer(request);
+    if (!auth) return sendV1Error(response, 401, "unauthorized", "Valid panda_token required");
+    const { configId, record } = auth;
     return sendV1Json(response, 200, {
       config_id: configId,
       config: redactConfigSecrets(record.config),
-      updated_at: record.updatedAt
+      updated_at: record.updatedAt,
+      has_management_token: !!record.managementTokenHash,
     });
   }
+
+  const mgmt = await resolveManagementAuth(request);
+  if (!mgmt) {
+    return sendV1Error(
+      response, 401, "unauthorized",
+      "This operation requires the management token. Send `Authorization: Bearer <management_token>` plus `X-Panda-Config-Id: <config_id>`.",
+    );
+  }
+  const { configId, record, usedLegacyAuth } = mgmt;
 
   if (request.method === "PATCH") {
     const body = await readJsonBody(request);
@@ -324,7 +447,8 @@ async function handleConfigMe(request, response, providers) {
     return sendV1Json(response, 200, {
       config_id: configId,
       config: redactConfigSecrets(updated.config),
-      updated_at: updated.updatedAt
+      updated_at: updated.updatedAt,
+      used_legacy_auth: usedLegacyAuth || undefined,
     });
   }
 

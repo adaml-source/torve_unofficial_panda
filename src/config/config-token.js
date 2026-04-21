@@ -35,15 +35,28 @@ function createSignature(payload, secret) {
   );
 }
 
-export async function encodeConfigToken(configId) {
+/**
+ * Encode a manifest-URL token. A version number is embedded so rotating the
+ * manifest token (without destroying the config) is possible — server bumps
+ * `manifestTokenVersion` on the config row, any token carrying a stale
+ * version fails decode. If version is omitted defaults to 1 for backward
+ * compat with existing tokens created before the versioning change.
+ */
+export async function encodeConfigToken(configId, version = 1) {
   const payload = encodeBase64Url(JSON.stringify({
-    version: 1,
-    configId
+    version: 1,            // envelope format version (unrelated to token rotation version)
+    configId,
+    tv: version,           // manifest-token rotation version
   }));
   const signature = createSignature(payload, await loadOrCreateSecret());
   return `${payload}.${signature}`;
 }
 
+/**
+ * Returns { configId, tokenVersion } on success, null on bad signature /
+ * malformed payload. Callers cross-reference tokenVersion against the
+ * config row's current manifestTokenVersion to enforce rotation.
+ */
 export async function decodeConfigToken(token) {
   try {
     const [payload, signature] = String(token || "").split(".");
@@ -64,9 +77,10 @@ export async function decodeConfigToken(token) {
     }
 
     const parsed = JSON.parse(decodeBase64Url(payload));
-    return typeof parsed?.configId === "string" && parsed.configId
-      ? parsed.configId
-      : null;
+    if (typeof parsed?.configId !== "string" || !parsed.configId) return null;
+    // tv is 1 for pre-rotation tokens that never carried the field
+    const tokenVersion = typeof parsed?.tv === "number" ? parsed.tv : 1;
+    return { configId: parsed.configId, tokenVersion };
   } catch {
     return null;
   }

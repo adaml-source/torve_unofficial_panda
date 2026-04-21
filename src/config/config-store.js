@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { decryptSecret, encryptSecret } from "../lib/crypto.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,21 +29,118 @@ function getDb() {
       config_json TEXT NOT NULL
     )
   `);
+  // Two-token model (added 2026-04-21):
+  // - manifest_token_version: bumped to invalidate a leaked manifest URL
+  //   without losing the stored config. Stream token carries its own tv;
+  //   server rejects tokens whose tv doesn't match current row.
+  // - management_token_hash: sha256 of the raw management token. The raw
+  //   value is shown to the user exactly once at create-time and required
+  //   as bearer on PATCH / DELETE / rotate endpoints. Null for legacy rows
+  //   created before this change (those still accept the manifest token as
+  //   fallback — users should rotate to establish a proper management token).
+  const cols = db.prepare("PRAGMA table_info(configs)").all().map(r => r.name);
+  if (!cols.includes("manifest_token_version")) {
+    db.exec("ALTER TABLE configs ADD COLUMN manifest_token_version INTEGER NOT NULL DEFAULT 1");
+  }
+  if (!cols.includes("management_token_hash")) {
+    db.exec("ALTER TABLE configs ADD COLUMN management_token_hash TEXT");
+  }
   return db;
 }
 
-export async function saveConfig(config) {
+/**
+ * Encrypt every at-rest secret field on a config object in place, leaving
+ * already-ciphertext values (`v1:...` prefix) untouched. Idempotent — safe
+ * to call on a config that's already encrypted (e.g. read-then-save cycles).
+ * Empty strings stay empty; non-string values coerce through String() first.
+ */
+async function encryptConfigForStorage(config) {
+  if (!config || typeof config !== "object") return config;
+  const out = { ...config };
+  for (const field of ENCRYPTED_AT_REST) {
+    const v = out[field];
+    if (typeof v === "string" && v !== "" && !v.startsWith(CIPHERTEXT_PREFIX)) {
+      out[field] = await encryptSecret(v);
+    }
+  }
+  // Nested indexer API keys
+  if (Array.isArray(out.nzbIndexers)) {
+    out.nzbIndexers = await Promise.all(out.nzbIndexers.map(async (r) => {
+      if (!r || typeof r !== "object") return r;
+      const apiKey = r.apiKey;
+      if (typeof apiKey === "string" && apiKey !== "" && !apiKey.startsWith(CIPHERTEXT_PREFIX)) {
+        return { ...r, apiKey: await encryptSecret(apiKey) };
+      }
+      return r;
+    }));
+  }
+  return out;
+}
+
+/**
+ * Mirror of encryptConfigForStorage — decrypts ciphertext fields back to
+ * plaintext for consumers (adapters, UI). Plaintext values (legacy rows
+ * that haven't been re-saved since encryption was enabled) pass through.
+ * Decryption failures return an empty string for that field and log —
+ * never throw, because one corrupt field shouldn't nuke the whole config.
+ */
+async function decryptConfigFromStorage(config) {
+  if (!config || typeof config !== "object") return config;
+  const out = { ...config };
+  for (const field of ENCRYPTED_AT_REST) {
+    const v = out[field];
+    if (typeof v === "string" && v.startsWith(CIPHERTEXT_PREFIX)) {
+      try {
+        out[field] = await decryptSecret(v);
+      } catch (err) {
+        console.warn(`[panda] Failed to decrypt ${field}:`, err.message);
+        out[field] = "";
+      }
+    }
+  }
+  if (Array.isArray(out.nzbIndexers)) {
+    out.nzbIndexers = await Promise.all(out.nzbIndexers.map(async (r) => {
+      if (!r || typeof r !== "object") return r;
+      const apiKey = r.apiKey;
+      if (typeof apiKey === "string" && apiKey.startsWith(CIPHERTEXT_PREFIX)) {
+        try {
+          return { ...r, apiKey: await decryptSecret(apiKey) };
+        } catch (err) {
+          console.warn(`[panda] Failed to decrypt nzbIndexer apiKey:`, err.message);
+          return { ...r, apiKey: "" };
+        }
+      }
+      return r;
+    }));
+  }
+  return out;
+}
+
+export async function saveConfig(config, { managementTokenHash = null } = {}) {
   await ensureDataDir();
 
   const database = getDb();
   const id = crypto.randomBytes(12).toString("hex");
   const timestamp = new Date().toISOString();
 
+  const encrypted = await encryptConfigForStorage(config);
   database
-    .prepare("INSERT INTO configs (id, created_at, updated_at, config_json) VALUES (?, ?, ?, ?)")
-    .run(id, timestamp, timestamp, JSON.stringify(config));
+    .prepare(
+      "INSERT INTO configs (id, created_at, updated_at, config_json, manifest_token_version, management_token_hash) " +
+      "VALUES (?, ?, ?, ?, 1, ?)",
+    )
+    .run(id, timestamp, timestamp, JSON.stringify(encrypted), managementTokenHash);
 
-  return { id, createdAt: timestamp, updatedAt: timestamp, config };
+  // Return the plaintext config the caller handed us, not the ciphertext
+  // snapshot — callers may immediately do redactConfigSecrets on it.
+  return {
+    id,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    config,
+    manifestTokenVersion: 1,
+    managementTokenHash,
+  };
 }
 
 export async function getConfigRecord(configId) {
@@ -50,17 +148,60 @@ export async function getConfigRecord(configId) {
 
   const database = getDb();
   const row = database
-    .prepare("SELECT id, created_at, updated_at, config_json FROM configs WHERE id = ?")
+    .prepare(
+      "SELECT id, created_at, updated_at, config_json, manifest_token_version, management_token_hash " +
+      "FROM configs WHERE id = ?",
+    )
     .get(configId);
 
   if (!row) return null;
+
+  // DB rows store secrets encrypted (for rows saved after the at-rest
+  // encryption change). Older rows may still be plaintext; decryptConfig
+  // passes those through unchanged.
+  const raw = JSON.parse(row.config_json);
+  const config = await decryptConfigFromStorage(raw);
 
   return {
     id: row.id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    config: JSON.parse(row.config_json),
+    config,
+    manifestTokenVersion: row.manifest_token_version || 1,
+    managementTokenHash: row.management_token_hash || null,
   };
+}
+
+/**
+ * Bump a config's manifest-token version, invalidating every outstanding
+ * manifest URL for that config. Caller must issue a freshly-signed token
+ * with the new version for the owner.
+ */
+export async function rotateManifestTokenVersion(configId) {
+  await ensureDataDir();
+  const database = getDb();
+  const row = database
+    .prepare("SELECT manifest_token_version FROM configs WHERE id = ?")
+    .get(configId);
+  if (!row) return null;
+  const next = (row.manifest_token_version || 1) + 1;
+  database
+    .prepare("UPDATE configs SET manifest_token_version = ?, updated_at = ? WHERE id = ?")
+    .run(next, new Date().toISOString(), configId);
+  return next;
+}
+
+/**
+ * Replace a config's management-token hash. Called when the user rotates
+ * or first-time provisions a management token for a legacy row.
+ */
+export async function setManagementTokenHash(configId, hash) {
+  await ensureDataDir();
+  const database = getDb();
+  const result = database
+    .prepare("UPDATE configs SET management_token_hash = ?, updated_at = ? WHERE id = ?")
+    .run(hash, new Date().toISOString(), configId);
+  return result.changes > 0;
 }
 
 // Secret fields that redactConfigSecrets masks when returning to the client.
@@ -76,6 +217,18 @@ const SECRET_FIELDS = [
   "downloadClientPassword",
   "downloadClientApiKey",
 ];
+// Fields that get encrypted at rest with AES-256-GCM. Subset of SECRET_FIELDS
+// — debridCredentialCiphertext is already a ciphertext produced elsewhere and
+// must not be double-encrypted.
+const ENCRYPTED_AT_REST = [
+  "debridApiKey",
+  "putioClientId",
+  "usenetPassword",
+  "nzbIndexerApiKey",
+  "downloadClientPassword",
+  "downloadClientApiKey",
+];
+const CIPHERTEXT_PREFIX = "v1:"; // matches encryptSecret() output format
 const REDACTION_MARKER = "[redacted]";
 
 export function redactConfigSecrets(config) {
@@ -132,10 +285,13 @@ export async function updateConfig(configId, nextConfig) {
   await ensureDataDir();
   const database = getDb();
   const timestamp = new Date().toISOString();
+  const encrypted = await encryptConfigForStorage(nextConfig);
   const result = database
     .prepare("UPDATE configs SET config_json = ?, updated_at = ? WHERE id = ?")
-    .run(JSON.stringify(nextConfig), timestamp, configId);
+    .run(JSON.stringify(encrypted), timestamp, configId);
   if (result.changes === 0) return null;
+  // Return the plaintext form to the caller — the encrypted snapshot is an
+  // internal storage detail, not part of the API contract.
   return { id: configId, updatedAt: timestamp, config: nextConfig };
 }
 
