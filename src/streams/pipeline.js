@@ -18,6 +18,7 @@ function withBudget(promise, source) {
 
 export async function buildStreams({
   config,
+  configId,
   mediaType,
   mediaId,
   proxyBaseUrl,
@@ -27,7 +28,7 @@ export async function buildStreams({
   sources.push(withBudget(fetchTorrentioStreams(config, mediaType, mediaId), "torrentio"));
 
   if (config.enableUsenet) {
-    sources.push(withBudget(fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl), "usenet"));
+    sources.push(withBudget(fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl, configId), "usenet"));
   }
 
   const results = await Promise.all(sources);

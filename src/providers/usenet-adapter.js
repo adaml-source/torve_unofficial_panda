@@ -1,5 +1,6 @@
 import { TtlCache } from "../lib/ttl-cache.js";
 import { isCloudDownloadClient, resolveNzbViaDebrid } from "./nzb-cloud.js";
+import { signNzbPayload } from "../lib/nzb-signing.js";
 
 // Shared cache for upstream query responses. Keyed per-user so one user's
 // auth failure doesn't poison another user's results.
@@ -63,6 +64,45 @@ function detectQualityFromName(name) {
   if (/\b720p\b/.test(n)) return "720p";
   if (/\b480p\b/.test(n)) return "480p";
   return "";
+}
+
+// Scene release titles encode audio language via well-known tokens. Newznab
+// indexers don't expose an `alangs` array like Easynews does, so we infer
+// from the title. Ordered so multi-indicators (DUAL, MULTI) win over single-
+// language tags when both appear. Unknown / undetected → empty string, which
+// callers render as "no language hint" (still typically English for scene).
+const LANG_TOKEN_RE = [
+  [/\b(MULTi|MULTI)\b/, "MULTI"],
+  [/\bDUAL\b/, "DUAL"],
+  [/\b(GERMAN|GER|GERDUB)\b/i, "DE"],
+  [/\b(ITALIAN|iTA|ITA)\b/i, "IT"],
+  [/\b(FRENCH|FR(E)?|TRUEFRENCH|VFF|VFQ)\b/i, "FR"],
+  [/\b(SPANISH|SPA|ESPAÑOL|LATINO|CASTELLANO)\b/i, "ES"],
+  [/\b(DUTCH|NL)\b/i, "NL"],
+  [/\b(PORTUGUESE|PTBR|PT-BR|POR)\b/i, "PT"],
+  [/\b(RUSSIAN|RUS|RU)\b/i, "RU"],
+  [/\b(POLISH|POL|PLDUB|PL)\b/i, "PL"],
+  [/\b(CZECH|CZE|CZ)\b/i, "CS"],
+  [/\b(JAPANESE|JAP|JPN)\b/i, "JA"],
+  [/\b(KOREAN|KOR|KR)\b/i, "KO"],
+  [/\b(TURKISH|TR|TUR)\b/i, "TR"],
+  [/\b(HINDI|HIN)\b/i, "HI"],
+  [/\b(CHINESE|CHN|MANDARIN|CANTONESE|CHS|CHT)\b/i, "ZH"],
+];
+
+function detectLanguagesFromTitle(title) {
+  if (!title) return "";
+  const matches = [];
+  for (const [re, label] of LANG_TOKEN_RE) {
+    if (re.test(title)) matches.push(label);
+  }
+  if (matches.length === 0) return "";
+  // MULTI/DUAL imply multi-track — surface as "MULTI" alone unless a specific
+  // language also matched, in which case keep the specific tag and drop the
+  // redundant MULTI marker.
+  if (matches.length === 1) return matches[0];
+  return matches.filter((l) => l !== "MULTI" && l !== "DUAL").join(", ")
+    || matches[0];
 }
 
 function formatFileSize(bytes) {
@@ -656,7 +696,7 @@ function getConfiguredIndexers(config) {
   }).filter(Boolean);
 }
 
-async function searchOneNewznab(indexer, config, mediaType, mediaId) {
+async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUrl, configId) {
   const { imdbId, season, episode } = parseMediaId(mediaId);
   const imdbNum = imdbId.replace("tt", "");
 
@@ -695,36 +735,40 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId) {
     const kept = items.slice(0, 15);
     const indexerName = indexer.displayName;
 
-    // If the user has a cloud NZB client configured, try to resolve each NZB
-    // to a direct stream URL. Unresolved entries (not cached / still
-    // downloading) are dropped — the app would fail to play them anyway.
-    if (isCloudDownloadClient(config.downloadClient) && config.downloadClientApiKey) {
-      const resolved = await Promise.all(
-        kept.map(async (item) => {
-          const title = item.title || "Unknown";
-          const nzbUrl = item.link || item.enclosure?.["@attributes"]?.url || "";
-          const sizeBytes = Number(item.enclosure?.["@attributes"]?.length) || 0;
-          if (!nzbUrl) return null;
-          const stream = await resolveNzbViaDebrid(config, nzbUrl, title).catch(() => null);
-          if (!stream?.url) return null;
-          const displaySize = formatFileSize(stream.size || sizeBytes);
-          const qualityLabel = detectQualityFromName(stream.filename || title);
-          return {
-            name: qualityLabel
-              ? `${indexerName}+${config.downloadClient}\n${qualityLabel}`
-              : `${indexerName}+${config.downloadClient}`,
-            title: `${stream.filename || title}\n💾 ${displaySize}`,
-            url: stream.url,
-            behaviorHints: {
-              notWebReady: false,
-              bingeGroup: `usenet-${config.downloadClient}`,
-              filename: stream.filename || title,
-              videoSize: stream.size || sizeBytes,
-            },
-          };
-        }),
-      );
-      return resolved.filter(Boolean);
+    // Cloud download client: don't submit NZBs at discovery — cloud APIs
+    // (TorBox especially) rate-limit create-download calls hard. Instead
+    // return a signed Panda URL per candidate; resolution happens on
+    // playback click, only for the chosen stream.
+    if (isCloudDownloadClient(config.downloadClient) && config.downloadClientApiKey && proxyBaseUrl && configId) {
+      const downloadClient = config.downloadClient;
+      const out = await Promise.all(kept.map(async (item) => {
+        const title = item.title || "Unknown";
+        const nzbUrl = item.link || item.enclosure?.["@attributes"]?.url || "";
+        const sizeBytes = Number(item.enclosure?.["@attributes"]?.length) || 0;
+        if (!nzbUrl) return null;
+        const displaySize = sizeBytes ? formatFileSize(sizeBytes) : "";
+        const qualityLabel = detectQualityFromName(title);
+        const langTag = detectLanguagesFromTitle(title);
+        const payload = await signNzbPayload(configId, { nzbUrl, title });
+        const metaLine = [
+          displaySize && `💾 ${displaySize}`,
+          langTag && `🗣️ ${langTag}`,
+        ].filter(Boolean).join("  ");
+        return {
+          name: qualityLabel
+            ? `${indexerName}+${downloadClient}\n${qualityLabel}`
+            : `${indexerName}+${downloadClient}`,
+          title: metaLine ? `${title}\n${metaLine}` : title,
+          url: `${proxyBaseUrl}/nzb/${payload}`,
+          behaviorHints: {
+            notWebReady: false,
+            bingeGroup: `usenet-${downloadClient}`,
+            filename: title,
+            videoSize: sizeBytes,
+          },
+        };
+      }));
+      return out.filter(Boolean);
     }
 
     // Local download client (nzbget/sabnzbd) or "none" — return raw NZB URLs.
@@ -735,9 +779,13 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId) {
       const size = item.enclosure?.["@attributes"]?.length
         ? formatFileSize(Number(item.enclosure["@attributes"].length))
         : "";
+      const langTag = detectLanguagesFromTitle(title);
+      const parts = [title];
+      if (size) parts.push(`💾 ${size}`);
+      if (langTag) parts.push(`🗣️ ${langTag}`);
       return {
         name: `${indexerName} (NZB)`,
-        title: [title, size].filter(Boolean).join(" | "),
+        title: parts.join(" | "),
         url: nzbUrl,
         behaviorHints: {
           notWebReady: true,
@@ -757,13 +805,13 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId) {
  * twice. Each indexer inherits the same cloud-debrid / local-downloader
  * config, so resolution is uniform.
  */
-async function searchNewznab(config, mediaType, mediaId) {
+async function searchNewznab(config, mediaType, mediaId, proxyBaseUrl, configId) {
   const indexers = getConfiguredIndexers(config);
   if (indexers.length === 0) return [];
 
   const batches = await Promise.all(
     indexers.map((idx) =>
-      searchOneNewznab(idx, config, mediaType, mediaId).catch((err) => {
+      searchOneNewznab(idx, config, mediaType, mediaId, proxyBaseUrl, configId).catch((err) => {
         console.error(`Indexer ${idx.type} failed: ${err.message}`);
         return [];
       }),
@@ -802,7 +850,7 @@ function releaseKey(stream) {
     .replace(/\.+/g, ".");
 }
 
-export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl) {
+export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl, configId) {
   if (!config.enableUsenet) return [];
 
   const hasAnyIndexer = getConfiguredIndexers(config).length > 0;
@@ -819,7 +867,7 @@ export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUr
 
   if (hasAnyIndexer) {
     sources.push(
-      searchNewznab(config, mediaType, mediaId).catch((err) => {
+      searchNewznab(config, mediaType, mediaId, proxyBaseUrl, configId).catch((err) => {
         console.error(`Newznab adapter error: ${err.message}`);
         return [];
       }).then((s) => ({ source: "nzb", streams: s })),

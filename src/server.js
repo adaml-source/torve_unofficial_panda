@@ -20,6 +20,8 @@ import { auditLog } from "./lib/audit.js";
 import { getProviderRegistry } from "./providers/provider-registry.js";
 import { buildStreams } from "./streams/pipeline.js";
 import { getCachedEasynewsCdnUrl } from "./providers/usenet-adapter.js";
+import { resolveNzbViaDebrid } from "./providers/nzb-cloud.js";
+import { verifyNzbPayload } from "./lib/nzb-signing.js";
 import { renderConfigPage } from "./ui/config-page.js";
 import { tryHandleV1 } from "./api/v1.js";
 
@@ -372,11 +374,45 @@ const server = http.createServer(async (request, response) => {
 
       const result = await buildStreams({
         config: record.config,
+        configId: record.id,
         mediaType,
         mediaId,
         proxyBaseUrl: `${baseUrl}/u/${token}`,
       });
       sendJson(response, 200, { streams: result.streams });
+      return;
+    }
+
+    // Lazy NZB resolver: a cloud-client stream URL points here. On first
+    // click we submit the signed NZB to the user's download client, poll
+    // briefly, and 302 to the resulting direct stream URL. Resolution cache
+    // in nzb-cloud.js means repeat clicks on the same candidate are free.
+    // The CDN URL contains a token — it stays inside TLS on the wire and
+    // never reaches Panda's log output.
+    const nzbMatch = url.pathname.match(/^\/u\/([^/]+)\/nzb\/([^/]+)$/);
+    if (request.method === "GET" && nzbMatch) {
+      const [, token, payload] = nzbMatch;
+      const record = await getStoredConfigOrNull(token);
+      if (!record) {
+        sendJson(response, 404, { error: "config_not_found" });
+        return;
+      }
+      const verified = await verifyNzbPayload(record.id, payload);
+      if (!verified) {
+        sendJson(response, 403, { error: "invalid_nzb_payload" });
+        return;
+      }
+      const stream = await resolveNzbViaDebrid(record.config, verified.nzbUrl, verified.title)
+        .catch(() => null);
+      if (!stream?.url) {
+        sendJson(response, 504, {
+          error: "nzb_not_ready",
+          message: "Download client could not resolve this NZB. It may still be downloading — try again shortly.",
+        });
+        return;
+      }
+      response.writeHead(302, { Location: stream.url, "cache-control": "no-store" });
+      response.end();
       return;
     }
 
