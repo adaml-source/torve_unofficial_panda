@@ -474,7 +474,7 @@ async function handleCreateConfig(request, response, providers) {
     panda_token: token,
     manifest_url: `${baseUrl}/u/${token}/manifest.json`,
     management_token: mgmt.raw,
-    management_token_notice: "Save this management token now — it's shown only once and is required to edit or delete this config later. Present it as `Authorization: Bearer <token>` with `X-Panda-Config-Id: <config_id>`.",
+    management_token_notice: "Save this management token now — it's shown only once and is required to edit or delete this config later.",
     expires_at: null
   });
 }
@@ -516,7 +516,7 @@ async function handleConfigMe(request, response, providers) {
     });
     return sendV1Error(
       response, 401, "unauthorized",
-      "This operation requires the management token. Send `Authorization: Bearer <management_token>` plus `X-Panda-Config-Id: <config_id>`.",
+      "This operation requires the management token.",
     );
   }
   const { configId, record, usedLegacyAuth } = mgmt;
