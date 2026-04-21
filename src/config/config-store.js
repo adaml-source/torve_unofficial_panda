@@ -63,21 +63,66 @@ export async function getConfigRecord(configId) {
   };
 }
 
+// Secret fields that redactConfigSecrets masks when returning to the client.
+// Keep in sync with the function below. Used by stripRedactionMarkers on the
+// way back in so clients that blindly re-POST the redacted payload don't
+// overwrite the stored secret with the literal "[redacted]" string.
+const SECRET_FIELDS = [
+  "debridApiKey",
+  "debridCredentialCiphertext",
+  "putioClientId",
+  "usenetPassword",
+  "nzbIndexerApiKey",
+  "downloadClientPassword",
+  "downloadClientApiKey",
+];
+const REDACTION_MARKER = "[redacted]";
+
 export function redactConfigSecrets(config) {
   if (!config) {
     return null;
   }
+  const out = { ...config };
+  for (const f of SECRET_FIELDS) {
+    out[f] = config[f] ? REDACTION_MARKER : "";
+  }
+  // Redact nested secrets inside nzbIndexers[].apiKey — same reasoning.
+  if (Array.isArray(out.nzbIndexers)) {
+    out.nzbIndexers = out.nzbIndexers.map((r) => r && typeof r === "object"
+      ? { ...r, apiKey: r.apiKey ? REDACTION_MARKER : "" }
+      : r);
+  }
+  return out;
+}
 
-  return {
-    ...config,
-    debridApiKey: config.debridApiKey ? "[redacted]" : "",
-    debridCredentialCiphertext: config.debridCredentialCiphertext ? "[redacted]" : "",
-    putioClientId: config.putioClientId ? "[redacted]" : "",
-    usenetPassword: config.usenetPassword ? "[redacted]" : "",
-    nzbIndexerApiKey: config.nzbIndexerApiKey ? "[redacted]" : "",
-    downloadClientPassword: config.downloadClientPassword ? "[redacted]" : "",
-    downloadClientApiKey: config.downloadClientApiKey ? "[redacted]" : "",
-  };
+/**
+ * Drop the redaction markers from an incoming config body, replacing them
+ * with the corresponding value from the existing saved config. Essential for
+ * PATCH flows where the client re-sends the last GET response: the GET is
+ * redacted, so the PATCH body contains "[redacted]" for every secret. Without
+ * this, saving any config edit would overwrite every stored secret with the
+ * literal string "[redacted]", breaking Easynews auth, debrid lookups, etc.
+ *
+ * POST (create) flow: `existing` is null; redaction markers are stripped to
+ * "" so sanitizeConfig falls back to defaults instead of storing the marker.
+ */
+export function stripRedactionMarkers(body, existing = null) {
+  if (!body || typeof body !== "object") return body;
+  const out = { ...body };
+  for (const f of SECRET_FIELDS) {
+    if (out[f] === REDACTION_MARKER) {
+      out[f] = existing?.[f] ?? "";
+    }
+  }
+  if (Array.isArray(out.nzbIndexers)) {
+    const existingArr = Array.isArray(existing?.nzbIndexers) ? existing.nzbIndexers : [];
+    out.nzbIndexers = out.nzbIndexers.map((r, i) => {
+      if (!r || typeof r !== "object") return r;
+      if (r.apiKey !== REDACTION_MARKER) return r;
+      return { ...r, apiKey: existingArr[i]?.apiKey ?? "" };
+    });
+  }
+  return out;
 }
 
 /**

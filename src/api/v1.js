@@ -36,6 +36,7 @@ import {
   getConfigRecord,
   redactConfigSecrets,
   saveConfig,
+  stripRedactionMarkers,
   updateConfig
 } from "../config/config-store.js";
 import { encryptSecret } from "../lib/crypto.js";
@@ -272,7 +273,9 @@ async function handleCreateConfig(request, response, providers) {
   const body = await readJsonBody(request);
   if (body == null) return sendV1Error(response, 400, "invalid_json", "Body must be JSON");
 
-  const config = sanitizeConfig(body, providers);
+  // Create flow has no prior config to merge against; any "[redacted]"
+  // placeholders get blanked so sanitizeConfig applies defaults.
+  const config = sanitizeConfig(stripRedactionMarkers(body), providers);
   const record = await saveConfig(config);
   const token = await encodeConfigToken(record.id);
   const baseUrl = `${request.headers["x-forwarded-proto"] || "http"}://${request.headers.host}`;
@@ -301,8 +304,12 @@ async function handleConfigMe(request, response, providers) {
   if (request.method === "PATCH") {
     const body = await readJsonBody(request);
     if (body == null) return sendV1Error(response, 400, "invalid_json", "Body must be JSON");
-    // Merge: unspecified fields keep existing value. Secrets kept unless replaced.
-    const merged = { ...record.config, ...body };
+    // Clients that re-send the last GET response will include "[redacted]"
+    // for every secret (see redactConfigSecrets). Restore the real stored
+    // value for any field the client didn't deliberately replace.
+    const unredactedBody = stripRedactionMarkers(body, record.config);
+    // Merge: unspecified fields keep existing value.
+    const merged = { ...record.config, ...unredactedBody };
     const nextConfig = sanitizeConfig(merged, providers);
     // Preserve secrets if caller didn't replace them (sanitizeConfig strips unknown ciphertext back to "")
     if (!body.debridCredentialCiphertext && record.config.debridCredentialCiphertext) {

@@ -14,7 +14,7 @@ import {
   SORT_OPTIONS,
   USENET_PROVIDERS
 } from "./config/schema.js";
-import { getConfigRecord, redactConfigSecrets, saveConfig } from "./config/config-store.js";
+import { getConfigRecord, redactConfigSecrets, saveConfig, stripRedactionMarkers } from "./config/config-store.js";
 import { getProviderRegistry } from "./providers/provider-registry.js";
 import { buildStreams } from "./streams/pipeline.js";
 import { getCachedEasynewsCdnUrl } from "./providers/usenet-adapter.js";
@@ -318,7 +318,10 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/configs") {
       const body = await readJsonBody(request);
-      const config = sanitizeConfig(body, providers);
+      // If the web UI re-saved a prior config, the body may contain
+      // "[redacted]" markers for every secret. Strip them so sanitizeConfig
+      // doesn't store the placeholder literal as the credential.
+      const config = sanitizeConfig(stripRedactionMarkers(body), providers);
       const record = await saveConfig(config);
       const token = await encodeConfigToken(record.id);
 
