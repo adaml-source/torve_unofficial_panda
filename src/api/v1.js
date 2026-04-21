@@ -404,14 +404,27 @@ async function handleConfigMe(request, response, providers) {
   // mutating and require the management token (sha256-hash-matched) so that a
   // leaked stream URL can't be used to tamper with credentials.
   if (request.method === "GET") {
+    // Read-only, so accept EITHER token. Manifest-token path is used by
+    // the normal "open my config for editing" flow; management-token path
+    // is used by the client's recovery flow to validate a pasted admin-
+    // issued token before storing it. Either way the response is secret-
+    // redacted, so this widens accessibility without leaking anything.
+    const mgmt = await resolveManagementAuth(request);
+    if (mgmt) {
+      return sendV1Json(response, 200, {
+        config_id: mgmt.configId,
+        config: redactConfigSecrets(mgmt.record.config),
+        updated_at: mgmt.record.updatedAt,
+        has_management_token: !!mgmt.record.managementTokenHash,
+      });
+    }
     const auth = await resolveBearer(request);
-    if (!auth) return sendV1Error(response, 401, "unauthorized", "Valid panda_token required");
-    const { configId, record } = auth;
+    if (!auth) return sendV1Error(response, 401, "unauthorized", "Valid panda_token or management_token required");
     return sendV1Json(response, 200, {
-      config_id: configId,
-      config: redactConfigSecrets(record.config),
-      updated_at: record.updatedAt,
-      has_management_token: !!record.managementTokenHash,
+      config_id: auth.configId,
+      config: redactConfigSecrets(auth.record.config),
+      updated_at: auth.record.updatedAt,
+      has_management_token: !!auth.record.managementTokenHash,
     });
   }
 
