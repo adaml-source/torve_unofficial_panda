@@ -127,13 +127,20 @@ async function torboxRequest(path, apiKey, init = {}) {
 // and some scene releases with many PAR2 blocks push higher. 50 MB is
 // still well below anything suspicious while covering real content.
 const NZB_FETCH_MAX_BYTES = 50 * 1024 * 1024;
-const NZB_FETCH_TIMEOUT_MS = 15000;
+const NZB_FETCH_TIMEOUT_MS = 30000;
+// Identifying User-Agent avoids indexers treating us as a bot and
+// slow-rolling requests, which previously caused 15s aborts.
+const NZB_FETCH_UA = "Panda/1.0 (+https://panda.torve.app)";
 
-async function fetchNzbAsBlob(nzbUrl) {
+async function fetchNzbAsBlobOnce(nzbUrl) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), NZB_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(nzbUrl, { signal: controller.signal, redirect: "follow" });
+    const res = await fetch(nzbUrl, {
+      signal: controller.signal,
+      redirect: "follow",
+      headers: { "User-Agent": NZB_FETCH_UA },
+    });
     if (!res.ok) throw new Error(`NZB fetch HTTP ${res.status}`);
     const len = Number(res.headers.get("content-length") || 0);
     if (len && len > NZB_FETCH_MAX_BYTES) throw new Error(`NZB too large: ${len} bytes`);
@@ -142,6 +149,17 @@ async function fetchNzbAsBlob(nzbUrl) {
     return blob;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function fetchNzbAsBlob(nzbUrl) {
+  // Indexers occasionally slow-roll a single request — retry once before
+  // giving up. Non-timeout errors (404, too-large) aren't worth retrying.
+  try {
+    return await fetchNzbAsBlobOnce(nzbUrl);
+  } catch (err) {
+    if (err.name !== "AbortError") throw err;
+    return fetchNzbAsBlobOnce(nzbUrl);
   }
 }
 

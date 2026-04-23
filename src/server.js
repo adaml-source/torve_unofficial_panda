@@ -1,3 +1,8 @@
+// Sentry must initialise before any other import so @sentry/node can hook
+// node:http at module-load time. No-op when PANDA_SENTRY_DSN is unset.
+import { init as initSentry, captureException } from "./lib/sentry.js";
+initSentry();
+
 import crypto from "node:crypto";
 import http from "node:http";
 import { URL } from "node:url";
@@ -528,6 +533,16 @@ const server = http.createServer(async (request, response) => {
     notFound(response);
   } catch (error) {
     console.error("Request handler error:", error?.stack || error);
+    try {
+      captureException(error, {
+        tags: { component: "request_handler" },
+        extra: {
+          method: request.method,
+          // Path only — query string can contain tokens.
+          path: (request.url || "").split("?")[0],
+        },
+      });
+    } catch { /* never let telemetry break the request path */ }
     // If a streaming handler already wrote headers (common for the easynews
     // proxy piping Range responses), we can't send a JSON error — just
     // close the socket and move on. Previously this path throws
