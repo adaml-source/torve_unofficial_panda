@@ -249,6 +249,28 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    // Configure page client script. Served as a separate static asset
+    // because the panda.torve.app CSP forbids inline scripts. Cached for
+    // a day with mtime-derived ETag so config-page interactivity works
+    // out of the box on every visit and updates propagate quickly.
+    if (request.method === "GET" && url.pathname === "/configure-page.js") {
+      const scriptPath = new URL("./ui/configure-script.js", import.meta.url);
+      try {
+        const fs = await import("node:fs");
+        const data = fs.readFileSync(scriptPath);
+        response.writeHead(200, {
+          "content-type": "application/javascript; charset=utf-8",
+          "content-length": data.length,
+          "cache-control": "public, max-age=300",
+        });
+        response.end(data);
+      } catch {
+        response.writeHead(404);
+        response.end();
+      }
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/logo.png") {
       const logoPath = new URL("./ui/panda-logo.png", import.meta.url);
       try {
