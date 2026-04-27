@@ -38,11 +38,13 @@ import {
   rotateManifestTokenVersion,
   saveConfig,
   setManagementTokenHash,
+  setOwnerTorveUserId,
   stripRedactionMarkers,
   updateConfig
 } from "../config/config-store.js";
 import { encryptSecret } from "../lib/crypto.js";
 import { auditLog } from "../lib/audit.js";
+import { verifyTorveJwtFromRequest } from "../lib/torve-jwt.js";
 import crypto from "node:crypto";
 
 /**
@@ -131,46 +133,82 @@ async function resolveBearer(request) {
 }
 
 /**
- * Authorise a mutating operation (PATCH / DELETE / rotate). Accepts:
- *   - Bearer <management_token>           preferred; compares against the
- *                                         sha256 hash stored on the config row
- *   - Bearer <manifest_token>             fallback ONLY for legacy rows that
- *                                         don't yet have a management token.
- *                                         Callers should immediately rotate
- *                                         to provision one.
- * Returns { record, usedLegacyAuth: boolean } on success, null on failure.
+ * Authorise a mutating operation (PATCH / DELETE / rotate). Accepts, in
+ * priority order:
+ *   1. A valid Torve JWT (Authorization: Bearer <jwt>, or ?torve_token=<jwt>)
+ *      whose sub is the recorded owner_torve_user_id of the config — or
+ *      whose sub will be recorded as the owner if the row is currently
+ *      unowned (lazy-claim path). This is the primary auth mechanism for
+ *      Torve users from 2026-04-26 onwards; eliminates the management_token
+ *      requirement entirely for them.
+ *   2. Bearer <management_token>           opaque hex, sha256-matched against
+ *                                          the row's stored hash.
+ *   3. Bearer <manifest_token>             legacy fallback ONLY for rows
+ *                                          with neither owner_torve_user_id
+ *                                          nor management_token_hash. These
+ *                                          should immediately rotate to
+ *                                          provision proper auth.
+ * Returns { record, configId, usedLegacyAuth, authMethod } on success,
+ * null on failure. authMethod is one of "torve_account" | "management" |
+ * "legacy_manifest".
  */
-async function resolveManagementAuth(request) {
+async function resolveManagementAuth(request, parsedUrl = null) {
+  // 1. Torve account auth — works for configs the JWT's user already owns.
+  //    Lazy-claim is intentionally narrow: only fires when the row has
+  //    NEITHER an owner NOR a management_token_hash, i.e. genuinely no
+  //    other auth is configured. Rows that still have a management_token
+  //    must be explicitly migrated (via the backfill script that walks
+  //    torve-backend's user_integrations table) — otherwise any Torve user
+  //    who guessed/discovered a config_id could claim someone else's row.
+  const torveAuth = verifyTorveJwtFromRequest(request, parsedUrl);
+  if (torveAuth) {
+    const configId = request.headers["x-panda-config-id"];
+    if (configId && typeof configId === "string") {
+      const record = await getConfigRecord(configId);
+      if (record) {
+        if (record.ownerTorveUserId === torveAuth.userId) {
+          return { record, configId, usedLegacyAuth: false, authMethod: "torve_account" };
+        }
+        if (!record.ownerTorveUserId && !record.managementTokenHash) {
+          await setOwnerTorveUserId(configId, torveAuth.userId);
+          const refreshed = await getConfigRecord(configId);
+          return { record: refreshed, configId, usedLegacyAuth: false, authMethod: "torve_account_claim" };
+        }
+        // Row owned by a different user OR has a management token still
+        // outstanding — fall through to the other auth methods.
+      }
+    }
+    // No config id supplied — fall through; the caller may still be
+    // presenting a management or manifest token.
+  }
+
   const auth = request.headers["authorization"] || "";
   const match = auth.match(/^Bearer\s+(.+)$/i);
   if (!match) return null;
   const rawToken = match[1].trim();
 
-  // Try management-token first (opaque hex, no "."), then manifest-token.
+  // 2. Management token (opaque hex, no "." — distinguishes it from JWT).
   if (!rawToken.includes(".")) {
     const incomingHash = hashManagementToken(rawToken);
-    // We don't know which config this belongs to without a scan, so require
-    // the caller to also identify the config via the X-Panda-Config-Id header
-    // OR to present a manifest bearer alongside it.
-    // Simpler: require management tokens to be paired with a manifest bearer
-    // in the X-Panda-Config header. For the v1 flow, the caller already knows
-    // their config_id from the creation response — trust it from a header.
     const configId = request.headers["x-panda-config-id"];
     if (!configId || typeof configId !== "string") return null;
     const record = await getConfigRecord(configId);
     if (!record || !record.managementTokenHash) return null;
     if (!timingSafeHashEqual(incomingHash, record.managementTokenHash)) return null;
-    return { record, configId, usedLegacyAuth: false };
+    return { record, configId, usedLegacyAuth: false, authMethod: "management" };
   }
 
-  // Manifest-token fallback path (legacy configs with no management hash yet)
+  // 3. Manifest-token legacy fallback — only for rows with no other auth.
   const manifestResolved = await resolveBearer(request);
   if (!manifestResolved) return null;
-  if (manifestResolved.record.managementTokenHash) {
-    // Row already has a management token — manifest bearer no longer auths writes.
-    return null;
-  }
-  return { record: manifestResolved.record, configId: manifestResolved.configId, usedLegacyAuth: true };
+  if (manifestResolved.record.managementTokenHash) return null;
+  if (manifestResolved.record.ownerTorveUserId) return null;
+  return {
+    record: manifestResolved.record,
+    configId: manifestResolved.configId,
+    usedLegacyAuth: true,
+    authMethod: "legacy_manifest",
+  };
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────
@@ -236,20 +274,20 @@ export async function tryHandleV1(request, response, url, providers) {
 
   // POST /api/v1/configs
   if (request.method === "POST" && url.pathname === "/api/v1/configs") {
-    await handleCreateConfig(request, response, providers);
+    await handleCreateConfig(request, response, providers, url);
     return true;
   }
 
   // /api/v1/configs/me
   if (url.pathname === "/api/v1/configs/me") {
-    await handleConfigMe(request, response, providers);
+    await handleConfigMe(request, response, providers, url);
     return true;
   }
 
   // POST /api/v1/configs/me/rotate-manifest — revokes the current manifest URL
   // and issues a new one. Use this when a stream URL has leaked.
   if (request.method === "POST" && url.pathname === "/api/v1/configs/me/rotate-manifest") {
-    const mgmt = await resolveManagementAuth(request);
+    const mgmt = await resolveManagementAuth(request, url);
     if (!mgmt) {
       auditLog(request, { action: "rotate_manifest", success: false, errorCode: "unauthorized" });
       return sendV1Error(response, 401, "unauthorized", "Management token required");
@@ -279,7 +317,7 @@ export async function tryHandleV1(request, response, url, providers) {
   // management token leaks, or to provision one for a legacy config that
   // never had one.
   if (request.method === "POST" && url.pathname === "/api/v1/configs/me/rotate-management") {
-    const mgmt = await resolveManagementAuth(request);
+    const mgmt = await resolveManagementAuth(request, url);
     if (!mgmt) {
       auditLog(request, { action: "rotate_management", success: false, errorCode: "unauthorized" });
       return sendV1Error(response, 401, "unauthorized", "Management token required");
@@ -307,7 +345,7 @@ export async function tryHandleV1(request, response, url, providers) {
   // your own raw debrid API key is the most sensitive operation in the API,
   // so a leaked manifest URL must not be able to trigger it.
   if (request.method === "GET" && url.pathname === "/api/v1/configs/me/export") {
-    const mgmt = await resolveManagementAuth(request);
+    const mgmt = await resolveManagementAuth(request, url);
     if (!mgmt) {
       auditLog(request, { action: "config_export", success: false, errorCode: "unauthorized" });
       return sendV1Error(response, 401, "unauthorized", "Management token required");
@@ -335,7 +373,7 @@ export async function tryHandleV1(request, response, url, providers) {
   // trace of the customer's activity remains. Keep the log rows themselves
   // (for aggregate forensic value) but null out the config_id / IP / UA.
   if (request.method === "POST" && url.pathname === "/api/v1/configs/me/purge") {
-    const mgmt = await resolveManagementAuth(request);
+    const mgmt = await resolveManagementAuth(request, url);
     if (!mgmt) {
       auditLog(request, { action: "config_purge", success: false, errorCode: "unauthorized" });
       return sendV1Error(response, 401, "unauthorized", "Management token required");
@@ -451,35 +489,59 @@ async function handleAuthAction(request, response, providerId, action) {
 
 // ── Config handlers ────────────────────────────────────────────────────
 
-async function handleCreateConfig(request, response, providers) {
+async function handleCreateConfig(request, response, providers, parsedUrl = null) {
   const body = await readJsonBody(request);
   if (body == null) return sendV1Error(response, 400, "invalid_json", "Body must be JSON");
 
   // Create flow has no prior config to merge against; any "[redacted]"
   // placeholders get blanked so sanitizeConfig applies defaults.
   const config = sanitizeConfig(stripRedactionMarkers(body), providers);
-  // Issue a management token at creation time. The RAW value is returned once
-  // here and never again; only its sha256 hash is persisted. Callers must
-  // store the raw value securely — losing it means losing edit access to the
-  // config (though the stream URL keeps working, since that's a separate
-  // token). This is the key property that makes a leaked manifest URL
-  // survivable: stream-only, not editable.
-  const mgmt = newManagementToken();
-  const record = await saveConfig(config, { managementTokenHash: mgmt.hash });
+
+  // Two paths:
+  // A) Caller is authenticated as a Torve user (Bearer JWT or ?torve_token=).
+  //    Record owner_torve_user_id and skip minting a management_token. The
+  //    Torve account becomes the management credential. No "save this once"
+  //    UX problem; new device just signs into Torve and manages.
+  // B) Anonymous/standalone caller. Mint a management_token and return it
+  //    once, exactly as before. Preserves Panda's standalone-Stremio-addon
+  //    use case for non-Torve users.
+  const torveAuth = verifyTorveJwtFromRequest(request, parsedUrl);
+
+  let mgmt = null;
+  let saveOpts;
+  if (torveAuth) {
+    saveOpts = { managementTokenHash: null, ownerTorveUserId: torveAuth.userId };
+  } else {
+    mgmt = newManagementToken();
+    saveOpts = { managementTokenHash: mgmt.hash };
+  }
+
+  const record = await saveConfig(config, saveOpts);
   const token = await encodeConfigToken(record.id, record.manifestTokenVersion || 1);
   const baseUrl = `${request.headers["x-forwarded-proto"] || "http"}://${request.headers.host}`;
-  auditLog(request, { action: "config_create", configId: record.id });
-  return sendV1Json(response, 200, {
+  auditLog(request, {
+    action: "config_create",
+    configId: record.id,
+    authMethod: torveAuth ? "torve_account" : "anonymous",
+  });
+
+  const payload = {
     config_id: record.id,
     panda_token: token,
     manifest_url: `${baseUrl}/u/${token}/manifest.json`,
-    management_token: mgmt.raw,
-    management_token_notice: "Save this management token now — it's shown only once and is required to edit or delete this config later.",
-    expires_at: null
-  });
+    expires_at: null,
+  };
+  if (mgmt) {
+    payload.management_token = mgmt.raw;
+    payload.management_token_notice = "Save this management token now — it's shown only once and is required to edit or delete this config later.";
+  } else {
+    payload.account_managed = true;
+    payload.account_managed_notice = "This config is bound to your Torve account. Sign in to Torve on any device to manage it. No management token is required.";
+  }
+  return sendV1Json(response, 200, payload);
 }
 
-async function handleConfigMe(request, response, providers) {
+async function handleConfigMe(request, response, providers, parsedUrl = null) {
   // GET is read-only: the manifest token alone suffices. PATCH / DELETE are
   // mutating and require the management token (sha256-hash-matched) so that a
   // leaked stream URL can't be used to tamper with credentials.
@@ -489,7 +551,7 @@ async function handleConfigMe(request, response, providers) {
     // is used by the client's recovery flow to validate a pasted admin-
     // issued token before storing it. Either way the response is secret-
     // redacted, so this widens accessibility without leaking anything.
-    const mgmt = await resolveManagementAuth(request);
+    const mgmt = await resolveManagementAuth(request, parsedUrl);
     if (mgmt) {
       return sendV1Json(response, 200, {
         config_id: mgmt.configId,
@@ -508,7 +570,7 @@ async function handleConfigMe(request, response, providers) {
     });
   }
 
-  const mgmt = await resolveManagementAuth(request);
+  const mgmt = await resolveManagementAuth(request, parsedUrl);
   if (!mgmt) {
     auditLog(request, {
       action: request.method === "DELETE" ? "config_delete" : "config_patch",

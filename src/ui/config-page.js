@@ -868,9 +868,18 @@ export function renderConfigPage({
           downloadClientApiKey: formData.get("downloadClientApiKey") || ""
         };
 
+        // Forward Torve account auth if the page was opened with one. The
+        // Torve site mints a short-lived JWT and appends it as
+        // ?torve_token=<jwt>; we hand it back to /api/configs as a Bearer
+        // header so the resulting config is bound to the user's Torve
+        // account (no management token to save).
+        const headers = { "content-type": "application/json" };
+        const torveToken = new URLSearchParams(window.location.search).get("torve_token");
+        if (torveToken) headers.authorization = "Bearer " + torveToken;
+
         const response = await fetch("/api/configs", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: headers,
           body: JSON.stringify(payload)
         });
         const data = await response.json();
@@ -881,8 +890,7 @@ export function renderConfigPage({
           return;
         }
 
-        result.hidden = false;
-        result.innerHTML = [
+        const sections = [
           "<h3>Panda is ready</h3>",
           "<p>Use this manifest URL in Torve or any compatible client.</p>",
           "<code>" + data.manifestUrl + "</code>",
@@ -890,8 +898,24 @@ export function renderConfigPage({
           "<button type='button' id='copy-manifest'>Copy manifest URL</button>",
           "<a class='button-link ghost' href='" + data.manifestUrl + "' target='_blank' rel='noreferrer'>Open manifest</a>",
           "</div>",
-          "<p class='note'>Signed token: " + data.token + "</p>"
-        ].join("");
+        ];
+        if (data.accountManaged) {
+          // Bound to the user's Torve account — no management token to save.
+          sections.push("<p class='note' style='margin-top:14px;color:#4ade80'>" +
+            "✓ Bound to your Torve account. Sign in to Torve on any device to manage this config.</p>");
+        } else if (data.managementToken) {
+          sections.push(
+            "<div style='margin-top:14px;padding:12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);border-radius:8px'>",
+            "<p style='margin:0 0 6px;font-weight:600;color:#fbbf24'>⚠ Management token (shown once)</p>",
+            "<code style='word-break:break-all'>" + data.managementToken + "</code>",
+            "<p style='margin:6px 0 0;font-size:12px;color:#888'>Save this now. Required to edit or delete this config later.</p>",
+            "</div>"
+          );
+        }
+        sections.push("<p class='note' style='margin-top:14px'>Signed token: " + data.token + "</p>");
+
+        result.hidden = false;
+        result.innerHTML = sections.join("");
 
         document.getElementById("copy-manifest").addEventListener("click", async () => {
           await navigator.clipboard.writeText(data.manifestUrl);

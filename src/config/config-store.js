@@ -38,12 +38,23 @@ function getDb() {
   //   as bearer on PATCH / DELETE / rotate endpoints. Null for legacy rows
   //   created before this change (those still accept the manifest token as
   //   fallback — users should rotate to establish a proper management token).
+  // - owner_torve_user_id (added 2026-04-26): when a config is created by
+  //   a caller authenticated as a Torve user, the user's UUID is recorded
+  //   here. Management endpoints accept a valid Torve JWT for this user as
+  //   an alternative to a management_token. Eliminates the
+  //   "save the management_token now or lose access" UX problem entirely
+  //   for Torve users; standalone (non-Torve) callers keep the
+  //   management_token model.
   const cols = db.prepare("PRAGMA table_info(configs)").all().map(r => r.name);
   if (!cols.includes("manifest_token_version")) {
     db.exec("ALTER TABLE configs ADD COLUMN manifest_token_version INTEGER NOT NULL DEFAULT 1");
   }
   if (!cols.includes("management_token_hash")) {
     db.exec("ALTER TABLE configs ADD COLUMN management_token_hash TEXT");
+  }
+  if (!cols.includes("owner_torve_user_id")) {
+    db.exec("ALTER TABLE configs ADD COLUMN owner_torve_user_id TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS ix_configs_owner_torve_user_id ON configs(owner_torve_user_id)");
   }
   return db;
 }
@@ -116,7 +127,7 @@ async function decryptConfigFromStorage(config) {
   return out;
 }
 
-export async function saveConfig(config, { managementTokenHash = null } = {}) {
+export async function saveConfig(config, { managementTokenHash = null, ownerTorveUserId = null } = {}) {
   await ensureDataDir();
 
   const database = getDb();
@@ -126,10 +137,10 @@ export async function saveConfig(config, { managementTokenHash = null } = {}) {
   const encrypted = await encryptConfigForStorage(config);
   database
     .prepare(
-      "INSERT INTO configs (id, created_at, updated_at, config_json, manifest_token_version, management_token_hash) " +
-      "VALUES (?, ?, ?, ?, 1, ?)",
+      "INSERT INTO configs (id, created_at, updated_at, config_json, manifest_token_version, management_token_hash, owner_torve_user_id) " +
+      "VALUES (?, ?, ?, ?, 1, ?, ?)",
     )
-    .run(id, timestamp, timestamp, JSON.stringify(encrypted), managementTokenHash);
+    .run(id, timestamp, timestamp, JSON.stringify(encrypted), managementTokenHash, ownerTorveUserId);
 
   // Return the plaintext config the caller handed us, not the ciphertext
   // snapshot — callers may immediately do redactConfigSecrets on it.
@@ -140,6 +151,7 @@ export async function saveConfig(config, { managementTokenHash = null } = {}) {
     config,
     manifestTokenVersion: 1,
     managementTokenHash,
+    ownerTorveUserId,
   };
 }
 
@@ -149,7 +161,7 @@ export async function getConfigRecord(configId) {
   const database = getDb();
   const row = database
     .prepare(
-      "SELECT id, created_at, updated_at, config_json, manifest_token_version, management_token_hash " +
+      "SELECT id, created_at, updated_at, config_json, manifest_token_version, management_token_hash, owner_torve_user_id " +
       "FROM configs WHERE id = ?",
     )
     .get(configId);
@@ -169,6 +181,7 @@ export async function getConfigRecord(configId) {
     config,
     manifestTokenVersion: row.manifest_token_version || 1,
     managementTokenHash: row.management_token_hash || null,
+    ownerTorveUserId: row.owner_torve_user_id || null,
   };
 }
 
@@ -201,6 +214,35 @@ export async function setManagementTokenHash(configId, hash) {
   const result = database
     .prepare("UPDATE configs SET management_token_hash = ?, updated_at = ? WHERE id = ?")
     .run(hash, new Date().toISOString(), configId);
+  return result.changes > 0;
+}
+
+/**
+ * Bind a Torve user as the owner of a config. Used by:
+ *   - lazy-claim: when a config has owner_torve_user_id IS NULL and the
+ *     first authenticated management call carries a Torve JWT, the calling
+ *     user becomes the owner. Subsequent management ops require this user.
+ *   - backfill: a one-shot script that walks torve-backend's user_integrations
+ *     table and back-fills the owner column for pre-2026-04-26 configs.
+ *
+ * Refuses to overwrite an existing non-null owner — that would let a leaked
+ * manifest token transfer ownership. Returns true on success.
+ */
+export async function setOwnerTorveUserId(configId, torveUserId, { allowOverwrite = false } = {}) {
+  await ensureDataDir();
+  const database = getDb();
+  if (!allowOverwrite) {
+    const existing = database
+      .prepare("SELECT owner_torve_user_id FROM configs WHERE id = ?")
+      .get(configId);
+    if (!existing) return false;
+    if (existing.owner_torve_user_id && existing.owner_torve_user_id !== torveUserId) {
+      return false;
+    }
+  }
+  const result = database
+    .prepare("UPDATE configs SET owner_torve_user_id = ?, updated_at = ? WHERE id = ?")
+    .run(torveUserId, new Date().toISOString(), configId);
   return result.changes > 0;
 }
 

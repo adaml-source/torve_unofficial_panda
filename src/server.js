@@ -27,6 +27,7 @@ import { buildStreams } from "./streams/pipeline.js";
 import { getCachedEasynewsCdnUrl } from "./providers/usenet-adapter.js";
 import { resolveNzbViaDebrid } from "./providers/nzb-cloud.js";
 import { verifyNzbPayload } from "./lib/nzb-signing.js";
+import { verifyTorveJwtFromRequest } from "./lib/torve-jwt.js";
 import { renderConfigPage } from "./ui/config-page.js";
 import { tryHandleV1 } from "./api/v1.js";
 
@@ -338,21 +339,45 @@ const server = http.createServer(async (request, response) => {
       // "[redacted]" markers for every secret. Strip them so sanitizeConfig
       // doesn't store the placeholder literal as the credential.
       const config = sanitizeConfig(stripRedactionMarkers(body), providers);
-      // Same two-token model as /api/v1/configs. Management token shown once,
-      // hash persisted. Needed for future PATCH / DELETE / rotate calls.
-      const mgmtRaw = crypto.randomBytes(32).toString("hex");
-      const mgmtHash = crypto.createHash("sha256").update(mgmtRaw).digest("hex");
-      const record = await saveConfig(config, { managementTokenHash: mgmtHash });
-      const token = await encodeConfigToken(record.id, record.manifestTokenVersion || 1);
-      auditLog(request, { action: "config_create", configId: record.id, extra: { via: "legacy_web_form" } });
 
-      sendJson(response, 200, {
+      // Two creation paths (matches /api/v1/configs):
+      // - Torve-authed (Bearer JWT or ?torve_token=): bind the Torve user
+      //   as owner, skip the management token. Configure page on
+      //   panda.torve.app receives torve_token via query string from
+      //   torve-backend's configure-link mint endpoint.
+      // - Anonymous: legacy management-token model.
+      const torveAuth = verifyTorveJwtFromRequest(request, url);
+      let mgmtRaw = null;
+      let saveOpts;
+      if (torveAuth) {
+        saveOpts = { managementTokenHash: null, ownerTorveUserId: torveAuth.userId };
+      } else {
+        mgmtRaw = crypto.randomBytes(32).toString("hex");
+        const mgmtHash = crypto.createHash("sha256").update(mgmtRaw).digest("hex");
+        saveOpts = { managementTokenHash: mgmtHash };
+      }
+
+      const record = await saveConfig(config, saveOpts);
+      const token = await encodeConfigToken(record.id, record.manifestTokenVersion || 1);
+      auditLog(request, {
+        action: "config_create",
+        configId: record.id,
+        extra: { via: "legacy_web_form", authMethod: torveAuth ? "torve_account" : "anonymous" },
+      });
+
+      const payload = {
         token,
         configId: record.id,
         manifestUrl: `${baseUrl}/u/${token}/manifest.json`,
-        managementToken: mgmtRaw,
-        managementTokenNotice: "Save this token now — shown only once. Required to edit or delete the config later.",
-      });
+      };
+      if (mgmtRaw) {
+        payload.managementToken = mgmtRaw;
+        payload.managementTokenNotice = "Save this token now — shown only once. Required to edit or delete the config later.";
+      } else {
+        payload.accountManaged = true;
+        payload.accountManagedNotice = "This config is bound to your Torve account. Sign in to Torve on any device to manage it.";
+      }
+      sendJson(response, 200, payload);
       return;
     }
 
