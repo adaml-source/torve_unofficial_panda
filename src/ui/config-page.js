@@ -32,6 +32,7 @@ export function renderConfigPage({
   baseUrl,
   providers,
   config,
+  editConfigId = null,
   qualityOptions,
   qualityProfiles,
   debridServices,
@@ -487,9 +488,19 @@ export function renderConfigPage({
             </ul>
           </div>
 
-          <form id="config-form" class="panel">
-        <h2>Recommended Setup</h2>
-        <p>These defaults are meant to work out of the box. You can still override the advanced filters below.</p>
+          ${editConfigId ? `
+          <div style="margin:14px 0 22px;padding:14px 18px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.18);border-radius:10px">
+            <p style="margin:0;font-size:13px;color:var(--text)">
+              <strong style="color:#4ade80">✓ Editing your existing Panda config.</strong>
+              Saved values are pre-filled below. Secrets show as <code style="background:rgba(0,0,0,.3);padding:1px 6px;border-radius:4px;font-size:11px">[redacted]</code> — leave them as-is to keep the stored value, or paste a new key to replace it.
+            </p>
+          </div>
+          ` : ""}
+          <form id="config-form" class="panel"${editConfigId ? ` data-edit-config-id="${editConfigId}"` : ""}>
+        <h2>${editConfigId ? "Edit your Panda config" : "Recommended Setup"}</h2>
+        <p>${editConfigId
+          ? "Change any field and click <strong>Update</strong> to save. Your manifest URL stays the same — every signed-in device picks up the change immediately."
+          : "These defaults are meant to work out of the box. You can still override the advanced filters below."}</p>
 
         <div class="grid">
           <label class="field">
@@ -701,7 +712,7 @@ export function renderConfigPage({
         </div>
 
         <div class="button-row" style="margin-top: 18px;">
-          <button type="submit">Generate Panda Manifest</button>
+          <button type="submit">${editConfigId ? "Update Panda config" : "Generate Panda Manifest"}</button>
           <a class="button-link ghost" href="${baseUrl}/manifest.json" target="_blank" rel="noreferrer">Open base manifest</a>
         </div>
           </form>

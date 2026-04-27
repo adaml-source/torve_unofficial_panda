@@ -20,7 +20,7 @@ import {
   SORT_OPTIONS,
   USENET_PROVIDERS
 } from "./config/schema.js";
-import { getConfigRecord, redactConfigSecrets, saveConfig, stripRedactionMarkers } from "./config/config-store.js";
+import { getConfigRecord, getConfigsByOwner, redactConfigSecrets, saveConfig, stripRedactionMarkers } from "./config/config-store.js";
 import { auditLog } from "./lib/audit.js";
 import { getProviderRegistry } from "./providers/provider-registry.js";
 import { buildStreams } from "./streams/pipeline.js";
@@ -334,13 +334,35 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/configure") {
+      // If the visitor arrived with a valid Torve JWT and already owns
+      // a Panda config, render the form pre-filled with their existing
+      // values (secrets redacted). They get a real edit experience —
+      // see what's stored, change a key, save → updates in place. No
+      // JWT or no existing config → blank-form create flow as before.
+      let config = createDefaultConfig();
+      let editConfigId = null;
+      const torveAuth = verifyTorveJwtFromRequest(request, url);
+      if (torveAuth) {
+        try {
+          const owned = await getConfigsByOwner(torveAuth.userId);
+          if (owned.length > 0) {
+            // Most-recent owned config wins. Most users only have one.
+            const existing = owned[0];
+            config = redactConfigSecrets(existing.config);
+            editConfigId = existing.id;
+          }
+        } catch (err) {
+          console.warn("[panda] /configure: could not load existing config:", err.message);
+        }
+      }
       sendHtml(
         response,
         200,
         renderConfigPage({
           baseUrl,
           providers,
-          config: createDefaultConfig(),
+          config,
+          editConfigId,
           qualityOptions: QUALITY_OPTIONS,
           qualityProfiles: QUALITY_PROFILES,
           debridServices: DEBRID_SERVICES,

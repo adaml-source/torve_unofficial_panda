@@ -218,6 +218,39 @@ export async function setManagementTokenHash(configId, hash) {
 }
 
 /**
+ * Return all configs owned by a given Torve user, newest first.
+ * Used by /configure to render the user's existing config in the form
+ * instead of defaults, and by future "list my Panda configs" UIs.
+ */
+export async function getConfigsByOwner(torveUserId) {
+  await ensureDataDir();
+  const database = getDb();
+  const rows = database
+    .prepare(
+      "SELECT id, created_at, updated_at, config_json, manifest_token_version, management_token_hash, owner_torve_user_id " +
+      "FROM configs WHERE owner_torve_user_id = ? " +
+      "ORDER BY datetime(updated_at) DESC",
+    )
+    .all(torveUserId);
+
+  const out = [];
+  for (const row of rows) {
+    const raw = JSON.parse(row.config_json);
+    const config = await decryptConfigFromStorage(raw);
+    out.push({
+      id: row.id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      config,
+      manifestTokenVersion: row.manifest_token_version || 1,
+      managementTokenHash: row.management_token_hash || null,
+      ownerTorveUserId: row.owner_torve_user_id,
+    });
+  }
+  return out;
+}
+
+/**
  * Bind a Torve user as the owner of a config. Used by:
  *   - lazy-claim: when a config has owner_torve_user_id IS NULL and the
  *     first authenticated management call carries a Torve JWT, the calling

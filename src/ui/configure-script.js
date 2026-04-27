@@ -177,16 +177,43 @@
     const torveToken = new URLSearchParams(window.location.search).get("torve_token");
     if (torveToken) headers.authorization = "Bearer " + torveToken;
 
-    const response = await fetch("/api/configs", {
-      method: "POST",
-      headers: headers,
-      body: JSON.stringify(payload),
-    });
+    // Two paths:
+    //   - Edit mode: form was rendered with data-edit-config-id (server
+    //     looked up the user's existing config and pre-filled the form).
+    //     Submit PATCHes /api/v1/configs/me — keeps the same manifest URL,
+    //     just updates settings in place.
+    //   - Create mode: form has no edit-config-id. Submit POSTs
+    //     /api/configs to mint a new config + manifest.
+    const editConfigId = form.dataset.editConfigId;
+    let response;
+    if (editConfigId) {
+      response = await fetch("/api/v1/configs/me", {
+        method: "PATCH",
+        headers: { ...headers, "x-panda-config-id": editConfigId },
+        body: JSON.stringify(payload),
+      });
+    } else {
+      response = await fetch("/api/configs", {
+        method: "POST",
+        headers: headers,
+        body: JSON.stringify(payload),
+      });
+    }
     const data = await response.json();
 
     if (!response.ok) {
       result.hidden = false;
-      result.innerHTML = "<h3>Could not create Panda config</h3><p>" + (data.error || "Unknown error") + "</p>";
+      result.innerHTML = "<h3>Could not save Panda config</h3><p>" + (data.error || data.message || "Unknown error") + "</p>";
+      return;
+    }
+
+    if (editConfigId) {
+      // Update — no fresh manifest URL, just confirm.
+      result.hidden = false;
+      result.innerHTML =
+        "<h3 style='color:#4ade80'>✓ Panda config updated</h3>" +
+        "<p>Your settings are saved. Every signed-in device picks up the change on its next stream request — no app restart needed.</p>" +
+        "<p class='note' style='margin-top:8px'>Manifest URL is unchanged.</p>";
       return;
     }
 
