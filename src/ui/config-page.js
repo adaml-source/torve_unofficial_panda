@@ -328,6 +328,27 @@ export function renderConfigPage({
       }
 
       .inline { display: flex; gap: 12px 18px; flex-wrap: wrap; }
+      /* Consistent checkbox-row label styling. Without these rules,
+         bare label-and-checkbox pairs inherit raw body styling and the
+         boxes render with browser-default look, clashing with the rest
+         of the form. */
+      .inline > label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: var(--text);
+        cursor: pointer;
+        line-height: 1.3;
+      }
+      input[type="checkbox"] {
+        accent-color: var(--accent);
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        flex-shrink: 0;
+        cursor: pointer;
+      }
       .secret-fields { display: grid; gap: 12px; }
 
       .result {
@@ -441,6 +462,19 @@ export function renderConfigPage({
             Configure your streaming sources — debrid, Usenet, and provider filters — in one place.
             Panda stores credentials server-side and gives you back a single manifest URL to install in Torve.
           </p>
+
+          <!-- Torve account auth banner. Hidden by JS when ?torve_token=
+               is present in the URL (i.e. the user arrived from torve.app
+               and will get the account-managed flow). Shown otherwise so
+               users who land here directly know how to skip the
+               management-token-once UX. -->
+          <div id="torve-auth-banner" style="display:none;margin:12px 0 18px;padding:14px 18px;background:rgba(200,164,78,.08);border:1px solid rgba(200,164,78,.18);border-radius:10px">
+            <p style="margin:0 0 8px;font-size:13px;color:var(--text)">
+              <strong style="color:#c8a44e">Skip the management token.</strong>
+              Open Panda setup from your Torve account and the config will be bound to your Torve sign-in instead — no separate token to save, manageable from any signed-in device.
+            </p>
+            <a href="https://torve.app/app/extensions.html" style="display:inline-block;margin-top:4px;padding:7px 14px;background:linear-gradient(135deg,#c8a44e,#dbb95c);color:#08080e;text-decoration:none;border-radius:6px;font-size:12px;font-weight:600">Open from Torve →</a>
+          </div>
 
           <!-- Field guidance panel -->
           <div class="info-panel">

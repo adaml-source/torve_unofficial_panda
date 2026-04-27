@@ -6,6 +6,13 @@
 // download-client fields) and the create-config submit handler live here.
 
 (function () {
+  // Show the "open from Torve" banner only when the page was reached
+  // without a Torve JWT in the URL — i.e. the visitor will land on the
+  // anonymous (management-token) flow unless they re-enter via torve.app.
+  const params = new URLSearchParams(window.location.search);
+  const banner = document.getElementById("torve-auth-banner");
+  if (banner) banner.style.display = params.get("torve_token") ? "none" : "";
+
   const form = document.getElementById("config-form");
   const result = document.getElementById("result");
   const debridServiceSelect = form.querySelector('select[name="debridService"]');
