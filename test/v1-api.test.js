@@ -182,7 +182,15 @@ describe("API key auth", () => {
 });
 
 describe("Config CRUD lifecycle", () => {
+  // Anonymous create flow returns a manifest token (panda_token) + a
+  // management token (management_token). GET (read) accepts either; PATCH
+  // / DELETE (mutating) require the management token paired with the
+  // X-Panda-Config-Id header — manifest-token-as-bearer is reserved for
+  // legacy rows with no management hash, which doesn't apply to freshly-
+  // created anonymous configs (they always mint a management token).
   let pandaToken;
+  let managementToken;
+  let configId;
 
   test("POST /configs creates config and returns token", async () => {
     const r = await req("POST", "/api/v1/configs", {
@@ -195,7 +203,10 @@ describe("Config CRUD lifecycle", () => {
     assert.equal(r.status, 200);
     assert.ok(r.data.panda_token);
     assert.ok(r.data.manifest_url.includes("/u/") && r.data.manifest_url.endsWith("/manifest.json"));
+    assert.ok(r.data.management_token, "anonymous create must mint a management token");
     pandaToken = r.data.panda_token;
+    managementToken = r.data.management_token;
+    configId = r.data.config_id;
   });
 
   test("GET /configs/me requires bearer", async () => {
@@ -214,7 +225,10 @@ describe("Config CRUD lifecycle", () => {
 
   test("PATCH /configs/me updates fields", async () => {
     const r = await req("PATCH", "/api/v1/configs/me", {
-      headers: { authorization: `Bearer ${pandaToken}` },
+      headers: {
+        authorization: `Bearer ${managementToken}`,
+        "x-panda-config-id": configId,
+      },
       body: { maxQuality: "720p" }
     });
     assert.equal(r.status, 200);
@@ -225,7 +239,10 @@ describe("Config CRUD lifecycle", () => {
 
   test("DELETE /configs/me removes config", async () => {
     const r = await req("DELETE", "/api/v1/configs/me", {
-      headers: { authorization: `Bearer ${pandaToken}` }
+      headers: {
+        authorization: `Bearer ${managementToken}`,
+        "x-panda-config-id": configId,
+      },
     });
     assert.equal(r.status, 200);
     assert.equal(r.data.deleted, true);

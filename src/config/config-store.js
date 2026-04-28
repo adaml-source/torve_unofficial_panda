@@ -56,7 +56,69 @@ function getDb() {
     db.exec("ALTER TABLE configs ADD COLUMN owner_torve_user_id TEXT");
     db.exec("CREATE INDEX IF NOT EXISTS ix_configs_owner_torve_user_id ON configs(owner_torve_user_id)");
   }
+  // Audit log for plaintext-secret reveals via /api/v1/configs/me/secrets.
+  // Every attempt (success and failure) lands here. Rate-limit lookups
+  // also read this table so successful reveals can be counted per user
+  // per hour / per day. result is one of: ok, forbidden, unauthorized,
+  // rate_limited, bad_request.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS audit_secret_reveals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      torve_user_id TEXT,
+      config_id TEXT,
+      result TEXT NOT NULL,
+      ip TEXT,
+      user_agent TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS ix_audit_secret_reveals_user_time " +
+    "ON audit_secret_reveals(torve_user_id, created_at)"
+  );
   return db;
+}
+
+/**
+ * Append one row to the secret-reveal audit log. Called from the
+ * /configs/me/secrets handler on every attempt — success, denial, rate
+ * limit. NEVER logs the secret values themselves (the table doesn't even
+ * have a column for them); only metadata about who tried what when.
+ */
+export async function auditSecretReveal({ torveUserId, configId, result, ip, userAgent }) {
+  await ensureDataDir();
+  const database = getDb();
+  database
+    .prepare(
+      "INSERT INTO audit_secret_reveals (torve_user_id, config_id, result, ip, user_agent, created_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .run(
+      torveUserId || null,
+      configId || null,
+      result,
+      ip || null,
+      userAgent ? String(userAgent).slice(0, 500) : null,
+      new Date().toISOString(),
+    );
+}
+
+/**
+ * Count successful secret-reveal events for a Torve user since the given
+ * ISO timestamp. Used by the rate limiter — only successes count toward
+ * the quota; rejections (forbidden / unauthorized / bad_request / earlier
+ * rate_limited) don't burn user quota.
+ */
+export async function countSecretRevealSuccesses(torveUserId, sinceIso) {
+  await ensureDataDir();
+  const database = getDb();
+  const row = database
+    .prepare(
+      "SELECT COUNT(*) AS n FROM audit_secret_reveals " +
+      "WHERE torve_user_id = ? AND result = 'ok' AND created_at >= ?"
+    )
+    .get(torveUserId, sinceIso);
+  return Number(row?.n || 0);
 }
 
 /**

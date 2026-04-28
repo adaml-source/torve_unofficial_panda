@@ -32,6 +32,8 @@ import {
   USENET_PROVIDERS
 } from "../config/schema.js";
 import {
+  auditSecretReveal,
+  countSecretRevealSuccesses,
   deleteConfig,
   getConfigRecord,
   redactConfigSecrets,
@@ -44,7 +46,7 @@ import {
 } from "../config/config-store.js";
 import { encryptSecret } from "../lib/crypto.js";
 import { auditLog } from "../lib/audit.js";
-import { verifyTorveJwtFromRequest } from "../lib/torve-jwt.js";
+import { verifyTorveJwt, verifyTorveJwtFromRequest } from "../lib/torve-jwt.js";
 import crypto from "node:crypto";
 
 /**
@@ -281,6 +283,19 @@ export async function tryHandleV1(request, response, url, providers) {
   // /api/v1/configs/me
   if (url.pathname === "/api/v1/configs/me") {
     await handleConfigMe(request, response, providers, url);
+    return true;
+  }
+
+  // GET /api/v1/configs/me/secrets — owner-only plaintext-secret read.
+  // The other /configs/me endpoints redact every secret on read; this one
+  // returns them unredacted so a Torve client signed in as the config
+  // owner can hydrate its local IntegrationSecretStore on every device,
+  // not just the one that did the original save. Auth is intentionally
+  // narrow: only a Torve JWT for the config's owner_torve_user_id is
+  // accepted — management tokens are rejected with 403, manifest tokens
+  // and any other invalid bearer get 401.
+  if (request.method === "GET" && url.pathname === "/api/v1/configs/me/secrets") {
+    await handleRevealSecrets(request, response);
     return true;
   }
 
@@ -539,6 +554,155 @@ async function handleCreateConfig(request, response, providers, parsedUrl = null
     payload.account_managed_notice = "This config is bound to your Torve account. Sign in to Torve on any device to manage it. No management token is required.";
   }
   return sendV1Json(response, 200, payload);
+}
+
+// ── Secret reveal (owner-only plaintext read) ────────────────────────────
+
+const REVEAL_HOURLY_LIMIT = 30;
+const REVEAL_DAILY_LIMIT = 200;
+
+/**
+ * Classify the Authorization Bearer presented on the secret-reveal call,
+ * without ever returning a plaintext secret based on a wrong token. The
+ * auth matrix demanded by the Torve clients team distinguishes three
+ * failure modes that the existing resolveManagementAuth conflates:
+ *
+ *   - Torve JWT (3 dot-separated segments) → verify; valid ⇒ jwt_valid,
+ *                                            invalid/expired ⇒ jwt_invalid
+ *   - Manifest token (1 dot)               → manifest
+ *   - Management token (no dots, opaque)   → mgmt
+ *   - Anything else / missing              → missing
+ *
+ * Manifest and missing/malformed → 401, mgmt → 403, jwt_invalid → 401,
+ * jwt_valid → owner-check then 200/403.
+ */
+function _classifyBearerForReveal(request) {
+  const auth = request.headers["authorization"] || "";
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  if (!match) return { kind: "missing" };
+  const tok = match[1].trim();
+  if (!tok) return { kind: "missing" };
+  const dots = (tok.match(/\./g) || []).length;
+  if (dots === 0) return { kind: "mgmt" };
+  if (dots === 1) return { kind: "manifest" };
+  if (dots === 2) {
+    // Inline-verify so we don't fall back to the query-string variant —
+    // ?torve_token= MUST NOT authorize secret reveals (the manifest URL
+    // is the most common channel for accidental token leakage).
+    const verified = verifyTorveJwt(tok);
+    if (verified) return { kind: "jwt_valid", userId: verified.userId };
+    return { kind: "jwt_invalid" };
+  }
+  return { kind: "missing" };
+}
+
+function _writeRevealResponse(response, statusCode, body) {
+  setCorsHeaders(response);
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store, private",
+  });
+  response.end(JSON.stringify(body));
+}
+
+function _clientIp(request) {
+  return (
+    request.headers["x-real-ip"] ||
+    (request.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    request.socket?.remoteAddress ||
+    null
+  );
+}
+
+async function handleRevealSecrets(request, response) {
+  const featureEnabled = (process.env.PANDA_REVEAL_SECRETS_ENABLED || "true").toLowerCase() !== "false";
+  if (!featureEnabled) {
+    _writeRevealResponse(response, 404, { code: "not_found", message: "Endpoint disabled." });
+    return;
+  }
+
+  const ip = _clientIp(request);
+  const userAgent = request.headers["user-agent"] || null;
+  const configId = request.headers["x-panda-config-id"];
+
+  // 400: required header missing. We don't even know who's calling, so
+  // the audit row goes in with NULL torve_user_id.
+  if (!configId || typeof configId !== "string") {
+    await auditSecretReveal({ torveUserId: null, configId: null, result: "bad_request", ip, userAgent });
+    _writeRevealResponse(response, 400, { code: "bad_request", message: "X-Panda-Config-Id header required." });
+    return;
+  }
+
+  const cls = _classifyBearerForReveal(request);
+
+  // 401: no bearer / manifest token / invalid (incl. expired) JWT.
+  if (cls.kind === "missing" || cls.kind === "manifest" || cls.kind === "jwt_invalid") {
+    await auditSecretReveal({ torveUserId: null, configId, result: "unauthorized", ip, userAgent });
+    _writeRevealResponse(response, 401, { code: "unauthorized", message: "Torve account authentication required." });
+    return;
+  }
+
+  // 403: management token is real auth but wrong kind for this endpoint.
+  if (cls.kind === "mgmt") {
+    await auditSecretReveal({ torveUserId: null, configId, result: "forbidden", ip, userAgent });
+    _writeRevealResponse(response, 403, { code: "forbidden", message: "Management token cannot read secrets. Use a Torve account JWT." });
+    return;
+  }
+
+  // From here we have cls.kind === "jwt_valid" + cls.userId.
+  const torveUserId = cls.userId;
+
+  // Rate limit before owner check — distinguishes "you're flooding" from
+  // "config not yours". Successful reveals only burn quota, but we charge
+  // the user even on a forthcoming forbidden so that scanning every
+  // config_id for ownership doesn't get a free pass. The 429 is returned
+  // before doing the owner lookup so attackers can't enumerate.
+  const now = Date.now();
+  const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
+  const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+  const hourlyOk = await countSecretRevealSuccesses(torveUserId, oneHourAgo);
+  if (hourlyOk >= REVEAL_HOURLY_LIMIT) {
+    await auditSecretReveal({ torveUserId, configId, result: "rate_limited", ip, userAgent });
+    response.setHeader("retry-after", "60");
+    _writeRevealResponse(response, 429, { code: "rate_limited", message: "Too many secret reads. Try again in a minute." });
+    return;
+  }
+  const dailyOk = await countSecretRevealSuccesses(torveUserId, oneDayAgo);
+  if (dailyOk >= REVEAL_DAILY_LIMIT) {
+    await auditSecretReveal({ torveUserId, configId, result: "rate_limited", ip, userAgent });
+    response.setHeader("retry-after", "3600");
+    _writeRevealResponse(response, 429, { code: "rate_limited", message: "Daily secret-read limit reached. Try again tomorrow." });
+    return;
+  }
+
+  // Owner check.
+  const record = await getConfigRecord(configId);
+  if (!record || !record.ownerTorveUserId || record.ownerTorveUserId !== torveUserId) {
+    await auditSecretReveal({ torveUserId, configId, result: "forbidden", ip, userAgent });
+    _writeRevealResponse(response, 403, { code: "forbidden", message: "Not the owner of this config." });
+    return;
+  }
+
+  // Success — return plaintext. record.config is already decrypted by
+  // getConfigRecord (decryptConfigFromStorage is applied there).
+  const cfg = record.config || {};
+  const indexers = Array.isArray(cfg.nzbIndexers) ? cfg.nzbIndexers : [];
+  const body = {
+    config_id: configId,
+    debrid_api_key: cfg.debridApiKey || "",
+    putio_client_id: cfg.putioClientId || "",
+    usenet_password: cfg.usenetPassword || "",
+    download_client_api_key: cfg.downloadClientApiKey || "",
+    download_client_password: cfg.downloadClientPassword || "",
+    nzb_indexer_api_key: cfg.nzbIndexerApiKey || "",
+    nzb_indexers: indexers.map((r) => ({
+      type: r?.type || "",
+      url: r?.url || "",
+      api_key: r?.apiKey || "",
+    })),
+  };
+  await auditSecretReveal({ torveUserId, configId, result: "ok", ip, userAgent });
+  _writeRevealResponse(response, 200, body);
 }
 
 async function handleConfigMe(request, response, providers, parsedUrl = null) {
