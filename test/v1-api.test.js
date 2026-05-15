@@ -277,6 +277,103 @@ describe("Config CRUD lifecycle", () => {
     assert.equal(record.config.debridAccounts[0].apiKey, "tb-key");
   });
 
+  test("POST /configs accepts debridConnections and GET returns redacted connections", async () => {
+    const created = await req("POST", "/api/v1/configs", {
+      body: {
+        debridConnections: [
+          { provider: "realdebrid", apiKey: "rd-key", enabled: true },
+          { provider: "torbox", apiKey: "tb-key", enabled: true },
+        ],
+      }
+    });
+    assert.equal(created.status, 200);
+
+    const { getConfigRecord } = await import("../src/config/config-store.js");
+    const record = await getConfigRecord(created.data.config_id);
+    assert.deepEqual(
+      record.config.debridAccounts.map((account) => [account.service, account.apiKey, account.enabled]),
+      [["realdebrid", "rd-key", true], ["torbox", "tb-key", true]],
+    );
+    assert.equal(record.config.debridService, "realdebrid");
+    assert.equal(record.config.debridApiKey, "rd-key");
+
+    const redacted = await req("GET", "/api/v1/configs/me", {
+      headers: { authorization: `Bearer ${created.data.panda_token}` }
+    });
+    assert.equal(redacted.status, 200);
+    assert.deepEqual(
+      redacted.data.config.debridConnections.map((connection) => [connection.provider, connection.apiKey, connection.enabled]),
+      [["realdebrid", "[redacted]", true], ["torbox", "[redacted]", true]],
+    );
+  });
+
+  test("PATCH /configs/me preserves connections when omitted and replaces them when explicit", async () => {
+    const created = await req("POST", "/api/v1/configs", {
+      body: {
+        debridConnections: [
+          { provider: "realdebrid", apiKey: "rd-key", enabled: true },
+          { provider: "torbox", apiKey: "tb-key", enabled: true },
+        ],
+      }
+    });
+    assert.equal(created.status, 200);
+
+    const unrelatedPatch = await req("PATCH", "/api/v1/configs/me", {
+      headers: {
+        authorization: `Bearer ${created.data.management_token}`,
+        "x-panda-config-id": created.data.config_id,
+      },
+      body: { maxQuality: "1080p" },
+    });
+    assert.equal(unrelatedPatch.status, 200);
+    assert.deepEqual(
+      unrelatedPatch.data.config.debridConnections.map((connection) => [connection.provider, connection.apiKey]),
+      [["realdebrid", "[redacted]"], ["torbox", "[redacted]"]],
+    );
+
+    const replacePatch = await req("PATCH", "/api/v1/configs/me", {
+      headers: {
+        authorization: `Bearer ${created.data.management_token}`,
+        "x-panda-config-id": created.data.config_id,
+      },
+      body: {
+        debridConnections: [
+          { provider: "realdebrid", apiKey: "[redacted]", enabled: true },
+          { provider: "premiumize", apiKey: "pm-key", enabled: true },
+        ],
+      },
+    });
+    assert.equal(replacePatch.status, 200);
+
+    const { getConfigRecord } = await import("../src/config/config-store.js");
+    const record = await getConfigRecord(created.data.config_id);
+    assert.deepEqual(
+      record.config.debridAccounts.map((account) => [account.service, account.apiKey, account.enabled]),
+      [["realdebrid", "rd-key", true], ["premiumize", "pm-key", true]],
+    );
+    assert.equal(record.config.debridService, "realdebrid");
+    assert.equal(record.config.debridApiKey, "rd-key");
+  });
+
+  test("legacy single-provider config exposes one debridConnections row", async () => {
+    const created = await req("POST", "/api/v1/configs", {
+      body: {
+        debridService: "realdebrid",
+        debridApiKey: "legacy-rd-key",
+      }
+    });
+    assert.equal(created.status, 200);
+
+    const redacted = await req("GET", "/api/v1/configs/me", {
+      headers: { authorization: `Bearer ${created.data.panda_token}` }
+    });
+    assert.equal(redacted.status, 200);
+    assert.deepEqual(
+      redacted.data.config.debridConnections.map((connection) => [connection.provider, connection.apiKey, connection.enabled]),
+      [["realdebrid", "[redacted]", true]],
+    );
+  });
+
   test("DELETE /configs/me removes config", async () => {
     const r = await req("DELETE", "/api/v1/configs/me", {
       headers: {

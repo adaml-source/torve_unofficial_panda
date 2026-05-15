@@ -30,6 +30,15 @@ function unique(values) {
 }
 
 function getDebridAccounts(config) {
+  if (Array.isArray(config.debridConnections) && config.debridConnections.length > 0) {
+    return config.debridConnections.map((connection) => ({
+      service: connection?.provider || connection?.service,
+      apiKey: connection?.apiKey || connection?.api_key || "",
+      credentialCiphertext: connection?.credentialCiphertext || connection?.credential_ciphertext || "",
+      putioClientId: connection?.putioClientId || connection?.putio_client_id || "",
+      enabled: connection?.enabled !== false,
+    }));
+  }
   if (Array.isArray(config.debridAccounts) && config.debridAccounts.length > 0) {
     return config.debridAccounts;
   }
@@ -41,23 +50,25 @@ function getDebridAccounts(config) {
     apiKey: config.debridApiKey || "",
     credentialCiphertext: config.debridCredentialCiphertext || "",
     putioClientId: config.putioClientId || "",
+    enabled: true,
   }];
 }
 
 async function createDebridCredential(account) {
   // Prefer encrypted credential; fall back to legacy plaintext apikey for
   // existing configs created before encryption was added.
-  let secret = account.apiKey || null;
+  let secret = account.apiKey || account.api_key || null;
   if (account.credentialCiphertext) {
     try {
       const { decryptSecret } = await import("../lib/crypto.js");
       secret = await decryptSecret(account.credentialCiphertext);
     } catch {
-      secret = account.apiKey || null;
+      secret = account.apiKey || account.api_key || null;
     }
   }
 
-  if (account.service === "putio") {
+  const service = account.service || account.provider;
+  if (service === "putio") {
     if (!account.putioClientId || !secret) return null;
     return `${account.putioClientId}@${secret}`;
   }
@@ -106,7 +117,8 @@ async function buildConfigPath(config) {
 
   const seenDebridServices = new Set();
   for (const account of getDebridAccounts(config)) {
-    const service = account?.service;
+    if (account?.enabled === false) continue;
+    const service = account?.service || account?.provider;
     if (!service || seenDebridServices.has(service)) continue;
     seenDebridServices.add(service);
     const debridSegment = DEBRID_SEGMENT_BY_SERVICE[service];

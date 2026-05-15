@@ -573,29 +573,53 @@ async function decryptCredentialCiphertext(ciphertext) {
 }
 
 async function revealDebridSecret(account) {
-  return account?.apiKey || await decryptCredentialCiphertext(account?.credentialCiphertext);
+  return account?.apiKey || account?.api_key || await decryptCredentialCiphertext(account?.credentialCiphertext || account?.credential_ciphertext);
+}
+
+function configuredDebridAccounts(cfg) {
+  if (Array.isArray(cfg.debridConnections) && cfg.debridConnections.length > 0) {
+    return cfg.debridConnections
+      .filter((row) => row && typeof row === "object")
+      .map((row) => ({
+        service: row.provider || row.service || "",
+        apiKey: row.apiKey || row.api_key || "",
+        credentialCiphertext: row.credentialCiphertext || row.credential_ciphertext || "",
+        credentialSource: row.credentialSource || row.credential_source || "",
+        displayIdentifier: row.displayIdentifier || row.display_identifier || "",
+        putioClientId: row.putioClientId || row.putio_client_id || "",
+        enabled: row.enabled !== false,
+      }));
+  }
+
+  if (Array.isArray(cfg.debridAccounts) && cfg.debridAccounts.length > 0) {
+    return cfg.debridAccounts;
+  }
+
+  if (cfg.debridService && cfg.debridService !== "none" && (cfg.debridApiKey || cfg.debridCredentialCiphertext)) {
+    return [{
+      service: cfg.debridService,
+      apiKey: cfg.debridApiKey || "",
+      credentialCiphertext: cfg.debridCredentialCiphertext || "",
+      credentialSource: cfg.debridCredentialSource || "",
+      displayIdentifier: cfg.debridDisplayIdentifier || "",
+      putioClientId: cfg.putioClientId || "",
+      enabled: true,
+    }];
+  }
+
+  return [];
 }
 
 async function revealDebridAccounts(cfg) {
-  const accounts = Array.isArray(cfg.debridAccounts) && cfg.debridAccounts.length > 0
-    ? cfg.debridAccounts
-    : (cfg.debridService && cfg.debridService !== "none" && (cfg.debridApiKey || cfg.debridCredentialCiphertext)
-        ? [{
-            service: cfg.debridService,
-            apiKey: cfg.debridApiKey || "",
-            credentialCiphertext: cfg.debridCredentialCiphertext || "",
-            credentialSource: cfg.debridCredentialSource || "",
-            displayIdentifier: cfg.debridDisplayIdentifier || "",
-            putioClientId: cfg.putioClientId || "",
-          }]
-        : []);
-
+  const accounts = configuredDebridAccounts(cfg);
   return await Promise.all(accounts.map(async (account) => ({
-    service: account?.service || "",
+    service: account?.service || account?.provider || "",
+    provider: account?.provider || account?.service || "",
     api_key: await revealDebridSecret(account),
     putio_client_id: account?.putioClientId || "",
     credential_source: account?.credentialSource || "",
     display_identifier: account?.displayIdentifier || "",
+    enabled: account?.enabled !== false,
   })));
 }
 
@@ -732,6 +756,11 @@ async function handleRevealSecrets(request, response) {
     debrid_api_key: debridAccounts[0]?.api_key || legacyDebridApiKey || "",
     putio_client_id: cfg.putioClientId || "",
     debrid_accounts: debridAccounts,
+    debrid_connections: debridAccounts.map((account) => ({
+      provider: account.provider || account.service || "",
+      api_key: account.api_key || "",
+      enabled: account.enabled !== false,
+    })),
     usenet_password: cfg.usenetPassword || "",
     download_client_api_key: cfg.downloadClientApiKey || "",
     download_client_password: cfg.downloadClientPassword || "",
@@ -799,16 +828,17 @@ async function handleConfigMe(request, response, providers, parsedUrl = null) {
     // for every secret (see redactConfigSecrets). Restore the real stored
     // value for any field the client didn't deliberately replace.
     const unredactedBody = stripRedactionMarkers(body, record.config);
+    const replacesDebridProviderSet = Array.isArray(body.debridConnections) || Array.isArray(body.debridAccounts);
     // Merge: unspecified fields keep existing value.
     const merged = { ...record.config, ...unredactedBody };
     const nextConfig = sanitizeConfig(merged, providers);
     // Preserve secrets if caller didn't replace them (sanitizeConfig strips unknown ciphertext back to "")
-    if (!body.debridCredentialCiphertext && record.config.debridCredentialCiphertext) {
+    if (!replacesDebridProviderSet && !body.debridCredentialCiphertext && record.config.debridCredentialCiphertext) {
       nextConfig.debridCredentialCiphertext = record.config.debridCredentialCiphertext;
       nextConfig.debridCredentialSource = record.config.debridCredentialSource;
       nextConfig.debridDisplayIdentifier = record.config.debridDisplayIdentifier;
     }
-    if (!body.debridApiKey && record.config.debridApiKey) {
+    if (!replacesDebridProviderSet && !body.debridApiKey && record.config.debridApiKey) {
       nextConfig.debridApiKey = record.config.debridApiKey;
     }
     const updated = await updateConfig(configId, nextConfig);

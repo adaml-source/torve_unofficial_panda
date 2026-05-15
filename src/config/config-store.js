@@ -407,6 +407,64 @@ const NESTED_DEBRID_SECRET_FIELDS = [
   "putioClientId",
 ];
 
+function debridProviderOf(row) {
+  return row?.provider || row?.service || "";
+}
+
+function debridApiKeyOf(row) {
+  return row?.apiKey ?? row?.api_key ?? "";
+}
+
+function normalizedDebridRows(config) {
+  if (!config || typeof config !== "object") return [];
+
+  if (Array.isArray(config.debridConnections) && config.debridConnections.length > 0) {
+    return config.debridConnections
+      .filter((r) => r && typeof r === "object" && debridProviderOf(r))
+      .map((r) => ({
+        provider: debridProviderOf(r),
+        apiKey: debridApiKeyOf(r),
+        credentialCiphertext: r.credentialCiphertext || r.credential_ciphertext || "",
+        putioClientId: r.putioClientId || r.putio_client_id || "",
+        enabled: r.enabled !== false,
+      }));
+  }
+
+  if (Array.isArray(config.debridAccounts) && config.debridAccounts.length > 0) {
+    return config.debridAccounts
+      .filter((r) => r && typeof r === "object" && debridProviderOf(r))
+      .map((r) => ({
+        provider: debridProviderOf(r),
+        apiKey: debridApiKeyOf(r),
+        credentialCiphertext: r.credentialCiphertext || "",
+        putioClientId: r.putioClientId || "",
+        enabled: r.enabled !== false,
+      }));
+  }
+
+  if (config.debridService && config.debridService !== "none" && (config.debridApiKey || config.debridCredentialCiphertext)) {
+    return [{
+      provider: config.debridService,
+      apiKey: config.debridApiKey || "",
+      credentialCiphertext: config.debridCredentialCiphertext || "",
+      putioClientId: config.putioClientId || "",
+      enabled: true,
+    }];
+  }
+
+  return [];
+}
+
+function publicDebridConnections(config, { redacted = false } = {}) {
+  return normalizedDebridRows(config)
+    .filter((row) => row.provider && (row.apiKey || row.credentialCiphertext || row.putioClientId))
+    .map((row) => ({
+      provider: row.provider,
+      apiKey: redacted ? REDACTION_MARKER : row.apiKey,
+      enabled: row.enabled !== false,
+    }));
+}
+
 export function redactConfigSecrets(config) {
   if (!config) {
     return null;
@@ -431,6 +489,7 @@ export function redactConfigSecrets(config) {
       return next;
     });
   }
+  out.debridConnections = publicDebridConnections(config, { redacted: true });
   return out;
 }
 
@@ -476,6 +535,27 @@ export function stripRedactionMarkers(body, existing = null) {
         if (next[field] === REDACTION_MARKER) {
           next[field] = prior[field] ?? "";
         }
+      }
+      return next;
+    });
+  }
+  if (Array.isArray(out.debridConnections)) {
+    const existingArr = normalizedDebridRows(existing);
+    const existingByProvider = new Map(
+      existingArr
+        .filter((r) => r && typeof r === "object" && typeof r.provider === "string")
+        .map((r) => [r.provider, r])
+    );
+    out.debridConnections = out.debridConnections.map((r, i) => {
+      if (!r || typeof r !== "object") return r;
+      const provider = debridProviderOf(r);
+      const prior = existingByProvider.get(provider) || existingArr[i] || {};
+      const next = { ...r };
+      if (next.apiKey === REDACTION_MARKER) {
+        next.apiKey = prior.apiKey ?? "";
+      }
+      if (next.api_key === REDACTION_MARKER) {
+        next.api_key = prior.apiKey ?? "";
       }
       return next;
     });

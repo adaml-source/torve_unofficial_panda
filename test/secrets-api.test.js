@@ -140,12 +140,12 @@ describe("GET /api/v1/configs/me/secrets", () => {
     assert.match(r.headers.get("cache-control") || "", /private/);
   });
 
-  test("happy path: bound owner gets plaintext multi-debrid accounts", async () => {
+  test("happy path: bound owner gets plaintext multi-debrid connections", async () => {
     const userId = "12121212-1212-1212-1212-121212121212";
     const configId = await createOwnedConfig(userId, {
-      debridAccounts: [
-        { service: "realdebrid", apiKey: "rd-key" },
-        { service: "torbox", apiKey: "tb-key" },
+      debridConnections: [
+        { provider: "realdebrid", apiKey: "rd-key", enabled: true },
+        { provider: "torbox", apiKey: "tb-key", enabled: true },
       ],
     });
     const r = await req("GET", "/api/v1/configs/me/secrets", {
@@ -158,6 +158,10 @@ describe("GET /api/v1/configs/me/secrets", () => {
     assert.deepEqual(
       r.data.debrid_accounts.map((account) => [account.service, account.api_key]),
       [["realdebrid", "rd-key"], ["torbox", "tb-key"]],
+    );
+    assert.deepEqual(
+      r.data.debrid_connections.map((connection) => [connection.provider, connection.api_key, connection.enabled]),
+      [["realdebrid", "rd-key", true], ["torbox", "tb-key", true]],
     );
     assert.equal(r.data.debrid_api_key, "rd-key");
   });
