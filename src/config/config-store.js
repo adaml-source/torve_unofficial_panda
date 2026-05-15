@@ -147,6 +147,22 @@ async function encryptConfigForStorage(config) {
       return r;
     }));
   }
+  // Nested debrid account secrets. credentialCiphertext is already produced
+  // by encryptSecret() through the auth API, so only plaintext/manual fields
+  // get the at-rest encryption pass here.
+  if (Array.isArray(out.debridAccounts)) {
+    out.debridAccounts = await Promise.all(out.debridAccounts.map(async (r) => {
+      if (!r || typeof r !== "object") return r;
+      const next = { ...r };
+      for (const field of ["apiKey", "putioClientId"]) {
+        const value = next[field];
+        if (typeof value === "string" && value !== "" && !value.startsWith(CIPHERTEXT_PREFIX)) {
+          next[field] = await encryptSecret(value);
+        }
+      }
+      return next;
+    }));
+  }
   return out;
 }
 
@@ -184,6 +200,24 @@ async function decryptConfigFromStorage(config) {
         }
       }
       return r;
+    }));
+  }
+  if (Array.isArray(out.debridAccounts)) {
+    out.debridAccounts = await Promise.all(out.debridAccounts.map(async (r) => {
+      if (!r || typeof r !== "object") return r;
+      const next = { ...r };
+      for (const field of ["apiKey", "putioClientId"]) {
+        const value = next[field];
+        if (typeof value === "string" && value.startsWith(CIPHERTEXT_PREFIX)) {
+          try {
+            next[field] = await decryptSecret(value);
+          } catch (err) {
+            console.warn(`[panda] Failed to decrypt debrid account ${field}:`, err.message);
+            next[field] = "";
+          }
+        }
+      }
+      return next;
     }));
   }
   return out;
@@ -367,6 +401,11 @@ const ENCRYPTED_AT_REST = [
 ];
 const CIPHERTEXT_PREFIX = "v1:"; // matches encryptSecret() output format
 const REDACTION_MARKER = "[redacted]";
+const NESTED_DEBRID_SECRET_FIELDS = [
+  "apiKey",
+  "credentialCiphertext",
+  "putioClientId",
+];
 
 export function redactConfigSecrets(config) {
   if (!config) {
@@ -381,6 +420,16 @@ export function redactConfigSecrets(config) {
     out.nzbIndexers = out.nzbIndexers.map((r) => r && typeof r === "object"
       ? { ...r, apiKey: r.apiKey ? REDACTION_MARKER : "" }
       : r);
+  }
+  if (Array.isArray(out.debridAccounts)) {
+    out.debridAccounts = out.debridAccounts.map((r) => {
+      if (!r || typeof r !== "object") return r;
+      const next = { ...r };
+      for (const field of NESTED_DEBRID_SECRET_FIELDS) {
+        next[field] = r[field] ? REDACTION_MARKER : "";
+      }
+      return next;
+    });
   }
   return out;
 }
@@ -410,6 +459,25 @@ export function stripRedactionMarkers(body, existing = null) {
       if (!r || typeof r !== "object") return r;
       if (r.apiKey !== REDACTION_MARKER) return r;
       return { ...r, apiKey: existingArr[i]?.apiKey ?? "" };
+    });
+  }
+  if (Array.isArray(out.debridAccounts)) {
+    const existingArr = Array.isArray(existing?.debridAccounts) ? existing.debridAccounts : [];
+    const existingByService = new Map(
+      existingArr
+        .filter((r) => r && typeof r === "object" && typeof r.service === "string")
+        .map((r) => [r.service, r])
+    );
+    out.debridAccounts = out.debridAccounts.map((r, i) => {
+      if (!r || typeof r !== "object") return r;
+      const prior = existingByService.get(r.service) || existingArr[i] || {};
+      const next = { ...r };
+      for (const field of NESTED_DEBRID_SECRET_FIELDS) {
+        if (next[field] === REDACTION_MARKER) {
+          next[field] = prior[field] ?? "";
+        }
+      }
+      return next;
     });
   }
   return out;

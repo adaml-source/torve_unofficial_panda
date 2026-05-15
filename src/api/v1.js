@@ -20,6 +20,7 @@ import {
 } from "../config/config-token.js";
 import {
   createDefaultConfig,
+  DEBRID_ACCOUNT_SERVICES,
   DEBRID_SERVICES,
   DOWNLOAD_CLIENTS,
   NZB_INDEXERS,
@@ -44,7 +45,7 @@ import {
   stripRedactionMarkers,
   updateConfig
 } from "../config/config-store.js";
-import { encryptSecret } from "../lib/crypto.js";
+import { decryptSecret, encryptSecret } from "../lib/crypto.js";
 import { auditLog } from "../lib/audit.js";
 import { verifyTorveJwt, verifyTorveJwtFromRequest } from "../lib/torve-jwt.js";
 import crypto from "node:crypto";
@@ -86,7 +87,7 @@ import {
 function setCorsHeaders(response) {
   response.setHeader("access-control-allow-origin", "*");
   response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
-  response.setHeader("access-control-allow-headers", "authorization, content-type");
+  response.setHeader("access-control-allow-headers", "authorization, content-type, x-panda-config-id");
   response.setHeader("access-control-max-age", "86400");
 }
 
@@ -240,6 +241,7 @@ export async function tryHandleV1(request, response, url, providers) {
   if (request.method === "GET" && url.pathname === "/api/v1/schema") {
     sendV1Json(response, 200, {
       debridServices: DEBRID_SERVICES,
+      debridAccountServices: DEBRID_ACCOUNT_SERVICES,
       usenetProviders: USENET_PROVIDERS,
       nzbIndexers: NZB_INDEXERS,
       downloadClients: DOWNLOAD_CLIENTS,
@@ -561,6 +563,42 @@ async function handleCreateConfig(request, response, providers, parsedUrl = null
 const REVEAL_HOURLY_LIMIT = 30;
 const REVEAL_DAILY_LIMIT = 200;
 
+async function decryptCredentialCiphertext(ciphertext) {
+  if (!ciphertext || typeof ciphertext !== "string") return "";
+  try {
+    return await decryptSecret(ciphertext);
+  } catch {
+    return "";
+  }
+}
+
+async function revealDebridSecret(account) {
+  return account?.apiKey || await decryptCredentialCiphertext(account?.credentialCiphertext);
+}
+
+async function revealDebridAccounts(cfg) {
+  const accounts = Array.isArray(cfg.debridAccounts) && cfg.debridAccounts.length > 0
+    ? cfg.debridAccounts
+    : (cfg.debridService && cfg.debridService !== "none" && (cfg.debridApiKey || cfg.debridCredentialCiphertext)
+        ? [{
+            service: cfg.debridService,
+            apiKey: cfg.debridApiKey || "",
+            credentialCiphertext: cfg.debridCredentialCiphertext || "",
+            credentialSource: cfg.debridCredentialSource || "",
+            displayIdentifier: cfg.debridDisplayIdentifier || "",
+            putioClientId: cfg.putioClientId || "",
+          }]
+        : []);
+
+  return await Promise.all(accounts.map(async (account) => ({
+    service: account?.service || "",
+    api_key: await revealDebridSecret(account),
+    putio_client_id: account?.putioClientId || "",
+    credential_source: account?.credentialSource || "",
+    display_identifier: account?.displayIdentifier || "",
+  })));
+}
+
 /**
  * Classify the Authorization Bearer presented on the secret-reveal call,
  * without ever returning a plaintext secret based on a wrong token. The
@@ -687,10 +725,13 @@ async function handleRevealSecrets(request, response) {
   // getConfigRecord (decryptConfigFromStorage is applied there).
   const cfg = record.config || {};
   const indexers = Array.isArray(cfg.nzbIndexers) ? cfg.nzbIndexers : [];
+  const debridAccounts = await revealDebridAccounts(cfg);
+  const legacyDebridApiKey = cfg.debridApiKey || await decryptCredentialCiphertext(cfg.debridCredentialCiphertext);
   const body = {
     config_id: configId,
-    debrid_api_key: cfg.debridApiKey || "",
+    debrid_api_key: debridAccounts[0]?.api_key || legacyDebridApiKey || "",
     putio_client_id: cfg.putioClientId || "",
+    debrid_accounts: debridAccounts,
     usenet_password: cfg.usenetPassword || "",
     download_client_api_key: cfg.downloadClientApiKey || "",
     download_client_password: cfg.downloadClientPassword || "",

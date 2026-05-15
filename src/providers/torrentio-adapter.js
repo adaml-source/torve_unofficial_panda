@@ -29,22 +29,37 @@ function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
-async function createDebridCredential(config) {
+function getDebridAccounts(config) {
+  if (Array.isArray(config.debridAccounts) && config.debridAccounts.length > 0) {
+    return config.debridAccounts;
+  }
+  if (!config.debridService || config.debridService === "none") {
+    return [];
+  }
+  return [{
+    service: config.debridService,
+    apiKey: config.debridApiKey || "",
+    credentialCiphertext: config.debridCredentialCiphertext || "",
+    putioClientId: config.putioClientId || "",
+  }];
+}
+
+async function createDebridCredential(account) {
   // Prefer encrypted credential; fall back to legacy plaintext apikey for
   // existing configs created before encryption was added.
-  let secret = config.debridApiKey || null;
-  if (config.debridCredentialCiphertext) {
+  let secret = account.apiKey || null;
+  if (account.credentialCiphertext) {
     try {
       const { decryptSecret } = await import("../lib/crypto.js");
-      secret = await decryptSecret(config.debridCredentialCiphertext);
+      secret = await decryptSecret(account.credentialCiphertext);
     } catch {
-      secret = config.debridApiKey || null;
+      secret = account.apiKey || null;
     }
   }
 
-  if (config.debridService === "putio") {
-    if (!config.putioClientId || !secret) return null;
-    return `${config.putioClientId}@${secret}`;
+  if (account.service === "putio") {
+    if (!account.putioClientId || !secret) return null;
+    return `${account.putioClientId}@${secret}`;
   }
 
   return secret || null;
@@ -89,10 +104,16 @@ async function buildConfigPath(config) {
     segments.push(`debridoptions=${debridOptions.join(",")}`);
   }
 
-  const debridSegment = DEBRID_SEGMENT_BY_SERVICE[config.debridService];
-  const debridCredential = await createDebridCredential(config);
-  if (debridSegment && debridCredential) {
-    segments.push(`${debridSegment}=${encodeURIComponent(debridCredential)}`);
+  const seenDebridServices = new Set();
+  for (const account of getDebridAccounts(config)) {
+    const service = account?.service;
+    if (!service || seenDebridServices.has(service)) continue;
+    seenDebridServices.add(service);
+    const debridSegment = DEBRID_SEGMENT_BY_SERVICE[service];
+    const debridCredential = await createDebridCredential(account);
+    if (debridSegment && debridCredential) {
+      segments.push(`${debridSegment}=${encodeURIComponent(debridCredential)}`);
+    }
   }
 
   return segments.join("|");

@@ -28,6 +28,51 @@ function providerCards(providers, enabledProviders) {
     .join("");
 }
 
+function escapeAttr(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function debridAccountRows(config, debridServices) {
+  const existing = Array.isArray(config.debridAccounts) && config.debridAccounts.length > 0
+    ? config.debridAccounts
+    : (config.debridService && config.debridService !== "none" && (config.debridApiKey || config.debridCredentialCiphertext || config.putioClientId)
+        ? [{
+            service: config.debridService,
+            apiKey: config.debridApiKey || config.debridCredentialCiphertext || "",
+            credentialCiphertext: config.debridCredentialCiphertext || "",
+            credentialSource: config.debridCredentialSource || "",
+            displayIdentifier: config.debridDisplayIdentifier || "",
+            putioClientId: config.putioClientId || "",
+          }]
+        : [{ service: "none", apiKey: "", credentialCiphertext: "", credentialSource: "", displayIdentifier: "", putioClientId: "" }]);
+
+  return existing.map((row, i) => {
+    const service = row.service || "none";
+    const secretValue = row.apiKey || row.credentialCiphertext || "";
+    return `
+      <div class="debrid-account-row grid" data-idx="${i}" data-credential-ciphertext="${escapeAttr(row.credentialCiphertext || "")}" data-credential-source="${escapeAttr(row.credentialSource || "")}" data-display-identifier="${escapeAttr(row.displayIdentifier || "")}">
+        <label class="field">
+          <span>Debrid service</span>
+          <select class="debrid-service">${optionTags(debridServices, service)}</select>
+        </label>
+        <label class="field debrid-key-field" style="${service && service !== "none" ? "" : "display:none"}">
+          <span>API key or access token</span>
+          <input type="password" class="debrid-apikey" value="${escapeAttr(secretValue)}" autocomplete="off">
+        </label>
+        <label class="field debrid-putio-field" style="${service === "putio" ? "" : "display:none"}">
+          <span>Put.io client ID</span>
+          <input type="password" class="debrid-putio-client-id" value="${escapeAttr(row.putioClientId || "")}" autocomplete="off">
+        </label>
+        <button type="button" class="debrid-remove btn-sm">Remove</button>
+      </div>
+    `;
+  }).join("");
+}
+
 export function renderConfigPage({
   baseUrl,
   providers,
@@ -351,6 +396,51 @@ export function renderConfigPage({
         cursor: pointer;
       }
       .secret-fields { display: grid; gap: 12px; }
+      .debrid-account-row, .nzb-indexer-row {
+        position: relative;
+        padding: 10px;
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin-bottom: 8px;
+      }
+      .debrid-remove, .nzb-remove {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        padding: 4px 8px;
+        font-size: 11px;
+        background: transparent;
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .secret-input-wrap {
+        position: relative;
+        width: 100%;
+      }
+      .secret-input-wrap input {
+        padding-right: 66px;
+      }
+      .secret-toggle {
+        position: absolute;
+        top: 50%;
+        right: 6px;
+        transform: translateY(-50%);
+        min-width: 48px;
+        padding: 5px 8px;
+        background: transparent;
+        color: var(--text-muted);
+        border: 1px solid transparent;
+        border-radius: 5px;
+        font-size: 11px;
+      }
+      .secret-toggle:hover {
+        color: var(--text);
+        border-color: var(--border);
+        opacity: 1;
+      }
 
       .result {
         margin-top: 18px;
@@ -504,10 +594,6 @@ export function renderConfigPage({
 
         <div class="grid">
           <label class="field">
-            <span>Debrid service</span>
-            <select name="debridService">${optionTags(debridServices, config.debridService)}</select>
-          </label>
-          <label class="field">
             <span>Quality profile</span>
             <select name="qualityProfile">${optionTags(qualityProfiles, config.qualityProfile)}</select>
           </label>
@@ -535,16 +621,12 @@ export function renderConfigPage({
 
         <div class="panel">
           <h3>Debrid Credentials</h3>
-          <p class="note">Required for debrid-backed streaming. Panda stores these server-side and never puts them in the addon URL.</p>
+          <p class="note">Add every debrid service you use. Each service keeps its own credential, so changing or adding a provider never reuses another provider's key.</p>
           <div class="secret-fields">
-            <label class="field">
-              <span>Debrid API key or access token</span>
-              <input type="password" name="debridApiKey" value="${config.debridApiKey || ""}" autocomplete="off">
-            </label>
-            <label class="field" id="putio-client-field" hidden>
-              <span>Put.io client ID</span>
-              <input type="text" name="putioClientId" value="${config.putioClientId || ""}" autocomplete="off">
-            </label>
+            <div id="debridAccountList" data-options='${JSON.stringify(debridServices)}'>
+              ${debridAccountRows(config, debridServices)}
+            </div>
+            <button type="button" id="addDebridAccountBtn" class="btn-sm" style="padding:6px 12px;font-size:12px;background:transparent;color:var(--accent);border:1px solid var(--accent);border-radius:6px;cursor:pointer;margin-top:4px">+ Add debrid service</button>
           </div>
         </div>
 

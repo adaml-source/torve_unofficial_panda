@@ -237,6 +237,46 @@ describe("Config CRUD lifecycle", () => {
     assert.equal(r.data.config.qualityProfile, "best_quality");
   });
 
+  test("PATCH /configs/me preserves redacted multi-debrid secrets by service", async () => {
+    const created = await req("POST", "/api/v1/configs", {
+      body: {
+        debridAccounts: [
+          { service: "realdebrid", apiKey: "rd-key" },
+          { service: "torbox", apiKey: "tb-key" },
+        ],
+      }
+    });
+    assert.equal(created.status, 200);
+
+    const redacted = await req("GET", "/api/v1/configs/me", {
+      headers: { authorization: `Bearer ${created.data.panda_token}` }
+    });
+    assert.equal(redacted.status, 200);
+    assert.deepEqual(
+      redacted.data.config.debridAccounts.map((account) => [account.service, account.apiKey]),
+      [["realdebrid", "[redacted]"], ["torbox", "[redacted]"]],
+    );
+
+    const patched = await req("PATCH", "/api/v1/configs/me", {
+      headers: {
+        authorization: `Bearer ${created.data.management_token}`,
+        "x-panda-config-id": created.data.config_id,
+      },
+      body: {
+        debridAccounts: [
+          { service: "torbox", apiKey: "[redacted]" },
+        ],
+      },
+    });
+    assert.equal(patched.status, 200);
+
+    const { getConfigRecord } = await import("../src/config/config-store.js");
+    const record = await getConfigRecord(created.data.config_id);
+    assert.equal(record.config.debridAccounts.length, 1);
+    assert.equal(record.config.debridAccounts[0].service, "torbox");
+    assert.equal(record.config.debridAccounts[0].apiKey, "tb-key");
+  });
+
   test("DELETE /configs/me removes config", async () => {
     const r = await req("DELETE", "/api/v1/configs/me", {
       headers: {

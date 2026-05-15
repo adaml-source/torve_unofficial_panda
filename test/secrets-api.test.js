@@ -140,6 +140,28 @@ describe("GET /api/v1/configs/me/secrets", () => {
     assert.match(r.headers.get("cache-control") || "", /private/);
   });
 
+  test("happy path: bound owner gets plaintext multi-debrid accounts", async () => {
+    const userId = "12121212-1212-1212-1212-121212121212";
+    const configId = await createOwnedConfig(userId, {
+      debridAccounts: [
+        { service: "realdebrid", apiKey: "rd-key" },
+        { service: "torbox", apiKey: "tb-key" },
+      ],
+    });
+    const r = await req("GET", "/api/v1/configs/me/secrets", {
+      headers: {
+        authorization: `Bearer ${signJwt(userId)}`,
+        "x-panda-config-id": configId,
+      },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(
+      r.data.debrid_accounts.map((account) => [account.service, account.api_key]),
+      [["realdebrid", "rd-key"], ["torbox", "tb-key"]],
+    );
+    assert.equal(r.data.debrid_api_key, "rd-key");
+  });
+
   test("403: different Torve user", async () => {
     const ownerId = "22222222-2222-2222-2222-222222222222";
     const otherId = "33333333-3333-3333-3333-333333333333";

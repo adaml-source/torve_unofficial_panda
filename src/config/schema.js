@@ -16,6 +16,7 @@ export const DEBRID_SERVICES = [
   "torbox",
   "putio"
 ];
+export const DEBRID_ACCOUNT_SERVICES = DEBRID_SERVICES.filter((service) => service !== "none");
 export const RELEASE_LANGUAGES = [
   "any",
   "english",
@@ -72,6 +73,7 @@ export function createDefaultConfig() {
     debridCredentialSource: "",       // "oauth" | "apikey" | ""
     debridDisplayIdentifier: "",      // e.g. username for UI (no secret)
     putioClientId: "",
+    debridAccounts: [],               // preferred: [{ service, apiKey, credentialCiphertext, putioClientId }]
     groupByQuality: true,
     sortTorrentsBy: "qualitysize",
     allowUncached: false,
@@ -155,10 +157,69 @@ const LIMITS = {
   identifier: 255,
 };
 
+function sanitizeCredentialCiphertext(value) {
+  if (typeof value !== "string") return "";
+  return sanitizeString(value, 4000);
+}
+
+function sanitizeDebridAccount(row) {
+  if (!row || typeof row !== "object") return null;
+  const service = DEBRID_ACCOUNT_SERVICES.includes(row.service) ? row.service : null;
+  if (!service) return null;
+
+  const account = {
+    service,
+    apiKey: sanitizeString(row.apiKey, LIMITS.apiKey),
+    credentialCiphertext: sanitizeCredentialCiphertext(row.credentialCiphertext),
+    credentialSource: sanitizeString(row.credentialSource, LIMITS.identifier),
+    displayIdentifier: sanitizeString(row.displayIdentifier, LIMITS.identifier),
+    putioClientId: sanitizeString(row.putioClientId, LIMITS.apiKey),
+  };
+
+  if (!account.apiKey && !account.credentialCiphertext) {
+    return null;
+  }
+  if (account.service !== "putio") {
+    account.putioClientId = "";
+  }
+  return account;
+}
+
+function sanitizeDebridAccounts(input) {
+  const raw = Array.isArray(input?.debridAccounts) ? input.debridAccounts.slice(0, DEBRID_ACCOUNT_SERVICES.length) : [];
+  const seen = new Set();
+  const accounts = [];
+
+  for (const row of raw) {
+    const account = sanitizeDebridAccount(row);
+    if (!account || seen.has(account.service)) continue;
+    seen.add(account.service);
+    accounts.push(account);
+  }
+
+  if (accounts.length > 0) return accounts;
+
+  const legacyService = DEBRID_ACCOUNT_SERVICES.includes(input?.debridService) ? input.debridService : null;
+  if (!legacyService) return [];
+  const legacy = sanitizeDebridAccount({
+    service: legacyService,
+    apiKey: input?.debridApiKey,
+    credentialCiphertext: input?.debridCredentialCiphertext,
+    credentialSource: input?.debridCredentialSource,
+    displayIdentifier: input?.debridDisplayIdentifier,
+    putioClientId: input?.putioClientId,
+  });
+  return legacy ? [legacy] : [];
+}
+
 export function sanitizeConfig(input, knownProviders) {
   const defaults = createDefaultConfig();
   const providerIds = knownProviders.map((provider) => provider.id);
   const enabledProviders = sanitizeStringArray(input?.enabledProviders, providerIds);
+  const debridAccounts = sanitizeDebridAccounts(input);
+  const firstDebridAccount = debridAccounts[0] || null;
+  const legacyDebridService = firstDebridAccount?.service
+    || (DEBRID_SERVICES.includes(input?.debridService) ? input.debridService : defaults.debridService);
 
   return {
     version: 2,
@@ -187,14 +248,13 @@ export function sanitizeConfig(input, knownProviders) {
         : defaults.releaseLanguage;
       return [legacy];
     })(),
-    debridService: DEBRID_SERVICES.includes(input?.debridService)
-      ? input.debridService
-      : defaults.debridService,
-    debridApiKey: sanitizeString(input?.debridApiKey, LIMITS.apiKey),
-    debridCredentialCiphertext: typeof input?.debridCredentialCiphertext === "string" ? input.debridCredentialCiphertext : "",
-    debridCredentialSource: typeof input?.debridCredentialSource === "string" ? input.debridCredentialSource : "",
-    debridDisplayIdentifier: sanitizeString(input?.debridDisplayIdentifier, LIMITS.identifier),
-    putioClientId: sanitizeString(input?.putioClientId, LIMITS.apiKey),
+    debridService: legacyDebridService,
+    debridApiKey: firstDebridAccount?.apiKey ?? sanitizeString(input?.debridApiKey, LIMITS.apiKey),
+    debridCredentialCiphertext: firstDebridAccount?.credentialCiphertext ?? sanitizeCredentialCiphertext(input?.debridCredentialCiphertext),
+    debridCredentialSource: firstDebridAccount?.credentialSource ?? sanitizeString(input?.debridCredentialSource, LIMITS.identifier),
+    debridDisplayIdentifier: firstDebridAccount?.displayIdentifier ?? sanitizeString(input?.debridDisplayIdentifier, LIMITS.identifier),
+    putioClientId: firstDebridAccount?.putioClientId ?? sanitizeString(input?.putioClientId, LIMITS.apiKey),
+    debridAccounts,
     groupByQuality: sanitizeBoolean(input?.groupByQuality, defaults.groupByQuality),
     sortTorrentsBy: SORT_OPTIONS.includes(input?.sortTorrentsBy)
       ? input.sortTorrentsBy
