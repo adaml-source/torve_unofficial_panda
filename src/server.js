@@ -24,8 +24,8 @@ import { getConfigRecord, getConfigsByOwner, redactConfigSecrets, saveConfig, st
 import { auditLog } from "./lib/audit.js";
 import { getProviderRegistry } from "./providers/provider-registry.js";
 import { buildStreams } from "./streams/pipeline.js";
-import { getCachedEasynewsCdnUrl } from "./providers/usenet-adapter.js";
-import { resolveNzbViaDebrid } from "./providers/nzb-cloud.js";
+import { getCachedEasynewsCdnUrl, authenticateSavedNzbUrl } from "./providers/usenet-adapter.js";
+import { resolveNzbViaDebrid, NzbCloudError } from "./providers/nzb-cloud.js";
 import { verifyNzbPayload } from "./lib/nzb-signing.js";
 import { verifyTorveJwtFromRequest } from "./lib/torve-jwt.js";
 import { renderConfigPage } from "./ui/config-page.js";
@@ -476,12 +476,24 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 403, { error: "invalid_nzb_payload" });
         return;
       }
-      const stream = await resolveNzbViaDebrid(record.config, verified.nzbUrl, verified.title)
-        .catch(() => null);
+      let stream;
+      try {
+        stream = await resolveNzbViaDebrid(record.config, authenticateSavedNzbUrl(record.config, verified.nzbUrl), verified.title);
+      } catch (error) {
+        const known = error instanceof NzbCloudError;
+        // Codes are safe to log; upstream URLs and response text can contain API keys.
+        console.error(`NZB preparation failed: ${known ? error.code : "internal_error"}`);
+        sendJson(response, known ? error.status : 502, {
+          error: known ? error.code : "nzb_preparation_failed",
+          message: known ? error.message : "This video could not be prepared. Try again or choose another source.",
+        });
+        return;
+      }
       if (!stream?.url) {
+        response.setHeader("Retry-After", "5");
         sendJson(response, 504, {
           error: "nzb_not_ready",
-          message: "Download client could not resolve this NZB. It may still be downloading — try again shortly.",
+          message: "The download is being prepared. Playback will start when the video is ready.",
         });
         return;
       }

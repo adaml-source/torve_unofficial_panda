@@ -2,6 +2,7 @@ import { TtlCache } from "../lib/ttl-cache.js";
 import { createHash } from "node:crypto";
 import { readNewznabResponse } from "./newznab-response.js";
 import { matchesUsenetIdentity } from "./usenet-identity.js";
+import { newznabDownloadUrl } from "./newznab-download.js";
 import { isCloudDownloadClient, resolveNzbViaDebrid } from "./nzb-cloud.js";
 import { signNzbPayload } from "../lib/nzb-signing.js";
 
@@ -700,6 +701,21 @@ function getConfiguredIndexers(config) {
   }).filter(Boolean);
 }
 
+// Previously displayed signed sources can outlive the search cache or a server repair.
+// Repair only known API/download references on this account's configured indexer.
+export function authenticateSavedNzbUrl(config, value) {
+  try {
+    const original = new URL(value);
+    const indexer = getConfiguredIndexers(config).find(entry => new URL(entry.url).origin === original.origin);
+    if (!indexer) return value;
+    const endpoint = new URL(indexer.url);
+    const path = endpoint.pathname.replace(/\/+$/, "");
+    endpoint.pathname = /\/api(?:\.php)?$/i.test(path) ? path : `${path}/api`;
+    const guid = /\/(?:details|release)\/([a-zA-Z0-9_-]+)\/?$/.exec(original.pathname)?.[1];
+    return newznabDownloadUrl({ link: value, guid }, endpoint, indexer.apiKey) || value;
+  } catch { return value; }
+}
+
 async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUrl, configId, identityPromise) {
   const { imdbId, season, episode } = parseMediaId(mediaId);
   const imdbNum = imdbId.replace("tt", "");
@@ -746,7 +762,9 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
 
     const metadata = await identityPromise;
     const identity = { imdbId, mediaType, season, episode, year: metadata?.year };
-    const kept = items.filter(item => matchesUsenetIdentity(item, identity)).slice(0, 15);
+    const kept = items.filter(item => matchesUsenetIdentity(item, identity))
+      .map(item => ({ ...item, downloadUrl: newznabDownloadUrl(item, endpoint, indexer.apiKey) }))
+      .filter(item => item.downloadUrl).slice(0, 15);
     const indexerName = indexer.displayName;
 
     // Cloud download client: don't submit NZBs at discovery — cloud APIs
@@ -757,7 +775,7 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
       const downloadClient = config.downloadClient;
       const out = await Promise.all(kept.map(async (item) => {
         const title = item.title || "Unknown";
-        const nzbUrl = item.link || item.enclosure?.["@attributes"]?.url || "";
+        const nzbUrl = item.downloadUrl;
         const sizeBytes = Number(item.enclosure?.["@attributes"]?.length) || 0;
         if (!nzbUrl) return null;
         const displaySize = sizeBytes ? formatFileSize(sizeBytes) : "";
@@ -790,7 +808,7 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
     // The app will hand these off to the user's configured download client.
     return kept.map((item) => {
       const title = item.title || "Unknown";
-      const nzbUrl = item.link || item.enclosure?.["@attributes"]?.url || "";
+      const nzbUrl = item.downloadUrl;
       const size = item.enclosure?.["@attributes"]?.length
         ? formatFileSize(Number(item.enclosure["@attributes"].length))
         : "";

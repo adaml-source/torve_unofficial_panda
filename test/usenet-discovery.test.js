@@ -88,7 +88,7 @@ test("Videothek RSS keeps the episode, NZB URL, size, and separate track hints",
   assert.equal(requested.pathname, "/api");
   assert.equal(requested.searchParams.get("extended"), "1");
   assert.equal(rows.length, 1);
-  assert.match(rows[0].url, /t=get&id=fixture&apikey=test-only/);
+  assert.match(rows[0].url, /t=get&id=fixture&apikey=videothek-fixture/);
   assert.match(rows[0].title, /1\.0 GB/);
   assert.match(rows[0].title, /🗣️ English/);
   assert.match(rows[0].title, /💬 German, French/);

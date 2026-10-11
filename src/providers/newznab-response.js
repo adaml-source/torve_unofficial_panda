@@ -44,6 +44,7 @@ export function parseNewznabResponse(body) {
     const enclosure = item.enclosure?.["@attributes"] ?? item.enclosure ?? {};
     return {
       title: text(item.title),
+      guid: text(item.guid),
       link: text(item.link) || text(enclosure.url),
       enclosure: { "@attributes": { url: text(enclosure.url), length: text(enclosure.length) || attributes.size || "" } },
       language: text(item.language) || attributes.language || "",

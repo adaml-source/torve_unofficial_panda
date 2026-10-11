@@ -9,6 +9,9 @@
 // Caller is responsible for skipping null entries in the Stremio stream list.
 
 import { TtlCache } from "../lib/ttl-cache.js";
+import { createHash } from "node:crypto";
+import { TorboxNzbResolver } from "./torbox-nzb.js";
+export { NzbCloudError } from "./torbox-nzb.js";
 
 const resolveCache = new TtlCache({ maxEntries: 2000 });
 const CACHE_TTL_OK = 30 * 60 * 1000;   // 30 min for successful stream URL
@@ -22,14 +25,6 @@ const CLOUD_CLIENTS = new Set(["premiumize", "torbox", "alldebrid"]);
 // slower falls through to the background poll.
 const POLL_ATTEMPTS = 6;
 const POLL_DELAY_MS = 2000;
-
-// Background poll for fresh downloads that TorBox hasn't finished yet. When
-// the foreground budget expires, this keeps polling and writes the resolved
-// stream URL into resolveCache so the user's next click (after their 60s
-// FAIL TTL has elapsed) finds a ready entry instantly.
-const BG_POLL_ATTEMPTS = 30;
-const BG_POLL_DELAY_MS = 10000;   // ~5 min total background lifetime
-const backgroundPollsInFlight = new Set();
 
 const VIDEO_RE = /\.(mkv|mp4|avi|mov|m4v|ts|wmv|mpg|mpeg)$/i;
 
@@ -114,142 +109,8 @@ async function premiumizeResolve(config, nzbUrl, title) {
   return null;
 }
 
-// ── TorBox ──
-
-async function torboxRequest(path, apiKey, init = {}) {
-  const url = `https://api.torbox.app/v1/api${path}`;
-  const headers = { Authorization: `Bearer ${apiKey}`, ...(init.headers || {}) };
-  return fetchJson(url, { ...init, headers });
-}
-
-// 50 MB cap on fetched NZB XML. Ordinary NZBs are 1-5 MB, but large 4K
-// remuxes with thousands of parts legitimately produce 10-20 MB files,
-// and some scene releases with many PAR2 blocks push higher. 50 MB is
-// still well below anything suspicious while covering real content.
-const NZB_FETCH_MAX_BYTES = 50 * 1024 * 1024;
-const NZB_FETCH_TIMEOUT_MS = 30000;
-// Identifying User-Agent avoids indexers treating us as a bot and
-// slow-rolling requests, which previously caused 15s aborts.
-const NZB_FETCH_UA = "Panda/1.0 (+https://panda.torve.app)";
-
-async function fetchNzbAsBlobOnce(nzbUrl) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), NZB_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(nzbUrl, {
-      signal: controller.signal,
-      redirect: "follow",
-      headers: { "User-Agent": NZB_FETCH_UA },
-    });
-    if (!res.ok) throw new Error(`NZB fetch HTTP ${res.status}`);
-    const len = Number(res.headers.get("content-length") || 0);
-    if (len && len > NZB_FETCH_MAX_BYTES) throw new Error(`NZB too large: ${len} bytes`);
-    const blob = await res.blob();
-    if (blob.size > NZB_FETCH_MAX_BYTES) throw new Error(`NZB too large: ${blob.size} bytes`);
-    return blob;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function fetchNzbAsBlob(nzbUrl) {
-  // Indexers occasionally slow-roll a single request — retry once before
-  // giving up. Non-timeout errors (404, too-large) aren't worth retrying.
-  try {
-    return await fetchNzbAsBlobOnce(nzbUrl);
-  } catch (err) {
-    if (err.name !== "AbortError") throw err;
-    return fetchNzbAsBlobOnce(nzbUrl);
-  }
-}
-
-async function torboxResolve(config, nzbUrl, title) {
-  const apiKey = config.downloadClientApiKey;
-  if (!apiKey) return null;
-
-  // Fetch the NZB on Panda's side and hand TorBox the raw bytes as a
-  // multipart upload. TorBox's `link` param silently fails (500 error)
-  // on indexer URLs it can't fetch from its own network — multipart
-  // upload bypasses that entirely and dedupes against existing downloads
-  // by NZB hash server-side.
-  let nzbBlob;
-  try {
-    nzbBlob = await fetchNzbAsBlob(nzbUrl);
-  } catch (err) {
-    console.error(`TorBox: NZB fetch failed: ${err.message}`);
-    return null;
-  }
-
-  const form = new FormData();
-  form.append("file", nzbBlob, "source.nzb");
-  if (title) form.append("name", title);
-
-  const create = await fetchJson("https://api.torbox.app/v1/api/usenet/createusenetdownload", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: form,
-  }, 30000).catch(() => null);
-  if (!create?.success) return null;
-  const dlId = create.data?.usenetdownload_id || create.data?.hash;
-  if (!dlId) return null;
-
-  // Inner poll — returns "failed" for terminal errors, a stream object when
-  // ready, or null when still downloading. Shared by foreground and
-  // background loops.
-  const pollOnce = async () => {
-    const listRes = await torboxRequest(`/usenet/mylist?id=${encodeURIComponent(dlId)}`, apiKey)
-      .catch(() => null);
-    const dl = listRes?.data;
-    const isReady = dl?.download_state === "completed"
-      || dl?.download_finished === true
-      || (dl?.progress === 1 && Array.isArray(dl?.files) && dl.files.length > 0);
-    if (isReady) {
-      const files = (dl.files || []).map((f) => ({ name: f.name || f.short_name, size: Number(f.size) || 0, id: f.id }));
-      const best = pickBestVideo(files);
-      if (!best) return "failed";
-      const urlRes = await torboxRequest(
-        `/usenet/requestdl?token=${encodeURIComponent(apiKey)}&usenet_id=${encodeURIComponent(dlId)}&file_id=${encodeURIComponent(best.id)}`,
-        apiKey,
-      ).catch(() => null);
-      const streamUrl = urlRes?.data;
-      return typeof streamUrl === "string"
-        ? { url: streamUrl, filename: best.name, size: best.size }
-        : "failed";
-    }
-    if (dl?.download_state === "failed" || dl?.download_state === "error") return "failed";
-    return null;
-  };
-
-  // Foreground: blocks the incoming HTTP request for POLL_ATTEMPTS × POLL_DELAY_MS.
-  // Resolves most TorBox-cached items (other user downloaded them before).
-  for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt++) {
-    const r = await pollOnce().catch(() => null);
-    if (r === "failed") return null;
-    if (r) return r;
-    if (attempt < POLL_ATTEMPTS - 1) await sleep(POLL_DELAY_MS);
-  }
-
-  // Background: continue polling after the request returns, so the user's
-  // retry (typically 60+ seconds later, after resolveCache FAIL TTL expires)
-  // finds a cached success entry and 302s immediately.
-  const cacheKey = `nzbcloud:torbox:${nzbUrl}`;
-  if (!backgroundPollsInFlight.has(cacheKey)) {
-    backgroundPollsInFlight.add(cacheKey);
-    (async () => {
-      try {
-        for (let i = 0; i < BG_POLL_ATTEMPTS; i++) {
-          await sleep(BG_POLL_DELAY_MS);
-          const r = await pollOnce().catch(() => null);
-          if (r === "failed") return;
-          if (r) { resolveCache.set(cacheKey, r, CACHE_TTL_OK); return; }
-        }
-      } finally {
-        backgroundPollsInFlight.delete(cacheKey);
-      }
-    })();
-  }
-  return null;
-}
+// TorBox keeps one submission per account/source and returns pending promptly.
+const torbox = new TorboxNzbResolver();
 
 // ── AllDebrid ──
 
@@ -307,21 +168,22 @@ async function allDebridResolve(config, nzbUrl, title) {
 
 const RESOLVERS = {
   premiumize: premiumizeResolve,
-  torbox: torboxResolve,
+  torbox: (config, url, title) => torbox.resolve(config, url, title),
   alldebrid: allDebridResolve,
 };
 
 /**
  * Resolve an NZB URL to a direct HTTPS stream URL via the configured cloud
- * download client. Returns null if not ready in time, if the service rejects
- * the NZB, or if no suitable video file was extracted.
+ * download client. Null means pending; TorBox errors remain explicit failures.
  */
 export async function resolveNzbViaDebrid(config, nzbUrl, title) {
   const client = config.downloadClient;
   const resolver = RESOLVERS[client];
   if (!resolver || !nzbUrl) return null;
 
-  const cacheKey = `nzbcloud:${client}:${nzbUrl}`;
+  if (client === "torbox") return resolver(config, nzbUrl, title);
+  const account = createHash("sha256").update(config.downloadClientApiKey || "").digest("hex");
+  const cacheKey = `nzbcloud:${client}:${account}:${nzbUrl}`;
   return resolveCache.memoize(
     cacheKey,
     () => resolver(config, nzbUrl, title).catch(() => null),
