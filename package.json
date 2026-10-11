@@ -13,6 +13,7 @@
     "node": ">=22.5"
   },
   "dependencies": {
-    "@sentry/node": "^9.47.1"
+    "@sentry/node": "^9.47.1",
+    "fast-xml-parser": "5.11.2"
   }
 }

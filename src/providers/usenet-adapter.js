@@ -1,4 +1,6 @@
 import { TtlCache } from "../lib/ttl-cache.js";
+import { createHash } from "node:crypto";
+import { readNewznabResponse } from "./newznab-response.js";
 import { isCloudDownloadClient, resolveNzbViaDebrid } from "./nzb-cloud.js";
 import { signNzbPayload } from "../lib/nzb-signing.js";
 
@@ -16,7 +18,7 @@ const EASYNEWS_TIMEOUT = 13000;
 
 const INDEXER_URLS = {
   nzbgeek: "https://api.nzbgeek.info",
-  scenenzbs: "https://scenenzbs.com",
+  scenenzbs: "https://treasure-maps.com",
   dognzb: "https://api.dognzb.cr",
   nzbplanet: "https://api.nzbplanet.net",
 };
@@ -39,7 +41,7 @@ function parseMediaId(mediaId) {
   };
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT, consume = null) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -48,7 +50,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT) 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    return response;
+    return consume ? await consume(response) : response;
   } finally {
     clearTimeout(timeout);
   }
@@ -691,7 +693,7 @@ function getConfiguredIndexers(config) {
       type: r.type,
       url,
       apiKey: r.apiKey,
-      displayName: r.type === "custom" ? "NZB" : r.type.toUpperCase(),
+      displayName: r.type === "custom" ? new URL(url).hostname : r.type === "scenenzbs" ? "Treasure Maps" : r.type.toUpperCase(),
     } : null;
   }).filter(Boolean);
 }
@@ -704,6 +706,7 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
     apikey: indexer.apiKey,
     o: "json",
     limit: "15",
+    extended: "1",
   });
 
   if (mediaType === "movie") {
@@ -717,17 +720,24 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
   }
 
   try {
-    const baseUrl = indexer.url.replace(/\/+$/, "");
-    const cacheKey = `nzb:${indexer.type}:${indexer.apiKey.slice(0, 8)}:${mediaType}:${mediaId}`;
+    const endpoint = new URL(indexer.url);
+    if (["scenenzbs.com", "www.scenenzbs.com"].includes(endpoint.hostname.toLowerCase())) {
+      endpoint.protocol = "https:";
+      endpoint.hostname = "treasure-maps.com";
+    }
+    const apiPath = endpoint.pathname.replace(/\/+$/, "");
+    endpoint.pathname = /\/api(?:\.php)?$/i.test(apiPath) ? apiPath : `${apiPath}/api`;
+    endpoint.hash = "";
+    for (const [name, value] of params) endpoint.searchParams.set(name, value);
+    // Include the endpoint and complete credentials; different custom
+    // indexers or accounts must not reuse each other's cached search.
+    const cacheKey = `nzb:${createHash("sha256").update(endpoint.href).digest("hex")}:${mediaType}:${mediaId}`;
     const items = await searchCache.memoize(
       cacheKey,
       async () => {
-        const response = await fetchWithTimeout(`${baseUrl}/api?${params}`, {
-          headers: { Accept: "application/json" },
-        });
-        const data = await response.json();
-        const raw = data?.channel?.item || data?.item || [];
-        return Array.isArray(raw) ? raw : [];
+        return fetchWithTimeout(endpoint.href, {
+          headers: { Accept: "application/json, application/rss+xml, application/xml, text/xml" },
+        }, DEFAULT_TIMEOUT, readNewznabResponse);
       },
       { pickTtl: (v) => (v.length > 0 ? CACHE_TTL_HIT : CACHE_TTL_MISS) },
     );
@@ -748,11 +758,12 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
         if (!nzbUrl) return null;
         const displaySize = sizeBytes ? formatFileSize(sizeBytes) : "";
         const qualityLabel = detectQualityFromName(title);
-        const langTag = detectLanguagesFromTitle(title);
+        const langTag = item.language || detectLanguagesFromTitle(title);
         const payload = await signNzbPayload(configId, { nzbUrl, title });
         const metaLine = [
           displaySize && `💾 ${displaySize}`,
           langTag && `🗣️ ${langTag}`,
+          item.subs && `💬 ${item.subs}`,
         ].filter(Boolean).join("  ");
         return {
           name: qualityLabel
@@ -779,10 +790,11 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
       const size = item.enclosure?.["@attributes"]?.length
         ? formatFileSize(Number(item.enclosure["@attributes"].length))
         : "";
-      const langTag = detectLanguagesFromTitle(title);
+      const langTag = item.language || detectLanguagesFromTitle(title);
       const parts = [title];
       if (size) parts.push(`💾 ${size}`);
       if (langTag) parts.push(`🗣️ ${langTag}`);
+      if (item.subs) parts.push(`💬 ${item.subs}`);
       return {
         name: `${indexerName} (NZB)`,
         title: parts.join(" | "),
