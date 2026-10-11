@@ -862,6 +862,18 @@ function releaseKey(stream) {
     .replace(/\.+/g, ".");
 }
 
+async function settleUsenetSource(promise) {
+  // Easynews may perform metadata lookups and serial language queries before
+  // returning. Finish inside the outer 14-second budget so a slow Easynews
+  // lookup cannot discard already completed Newznab results.
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ source: "timed-out", streams: [] }), 13000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUrl, configId) {
   if (!config.enableUsenet) return [];
 
@@ -888,7 +900,7 @@ export async function fetchUsenetStreams(config, mediaType, mediaId, proxyBaseUr
 
   if (sources.length === 0) return [];
 
-  const tagged = await Promise.all(sources);
+  const tagged = await Promise.all(sources.map(settleUsenetSource));
   const easynewsStreams = tagged.find((t) => t.source === "easynews")?.streams || [];
   const nzbStreams = tagged.find((t) => t.source === "nzb")?.streams || [];
 

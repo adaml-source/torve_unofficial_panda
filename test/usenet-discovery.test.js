@@ -117,3 +117,17 @@ test("XML auth errors, HTML login pages and DTDs are not cached as valid empty s
   for (let i = 0; i < 3; i++) assert.deepEqual(await fetchUsenetStreams(cfg, "series", episode), []);
   assert.equal((await fetchUsenetStreams(cfg, "series", episode)).length, 1);
 });
+
+test("a stalled Easynews lookup cannot erase completed indexer results", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(globalThis, "fetch", async (value) => new URL(value).hostname === "quick-indexer.example"
+    ? Response.json({ channel: { item: [item("Quick")] } }) : new Promise(() => {}));
+  const cfg = { ...config([{ type: "custom", url: "https://quick-indexer.example", apiKey: "quick-fixture" }]),
+    usenetProvider: "easynews", usenetUsername: "fixture", usenetPassword: "fixture" };
+  const pending = fetchUsenetStreams(cfg, "series", episode);
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(13000);
+  const rows = await pending;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].title, /^Quick/);
+});
