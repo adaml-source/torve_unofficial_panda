@@ -1,6 +1,7 @@
 import { TtlCache } from "../lib/ttl-cache.js";
 import { createHash } from "node:crypto";
 import { readNewznabResponse } from "./newznab-response.js";
+import { matchesUsenetIdentity } from "./usenet-identity.js";
 import { isCloudDownloadClient, resolveNzbViaDebrid } from "./nzb-cloud.js";
 import { signNzbPayload } from "../lib/nzb-signing.js";
 
@@ -593,6 +594,7 @@ async function searchEasynews(config, mediaType, mediaId, baseUrl) {
           item.rawSize > 0 &&
           typeof sig === "string" && sig &&
           typeof name === "string" && name &&
+          matchesUsenetIdentity({ title: name }, { imdbId, mediaType, season, episode, year }) &&
           !item.passwd &&
           !item.virus &&
           /\.(mkv|mp4|avi|mov|m4v|ts|wmv|mpg|mpeg)$/i.test(ext)
@@ -698,14 +700,14 @@ function getConfiguredIndexers(config) {
   }).filter(Boolean);
 }
 
-async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUrl, configId) {
+async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUrl, configId, identityPromise) {
   const { imdbId, season, episode } = parseMediaId(mediaId);
   const imdbNum = imdbId.replace("tt", "");
 
   const params = new URLSearchParams({
     apikey: indexer.apiKey,
     o: "json",
-    limit: "15",
+    limit: "100",
     extended: "1",
   });
 
@@ -742,7 +744,9 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
       { pickTtl: (v) => (v.length > 0 ? CACHE_TTL_HIT : CACHE_TTL_MISS) },
     );
 
-    const kept = items.slice(0, 15);
+    const metadata = await identityPromise;
+    const identity = { imdbId, mediaType, season, episode, year: metadata?.year };
+    const kept = items.filter(item => matchesUsenetIdentity(item, identity)).slice(0, 15);
     const indexerName = indexer.displayName;
 
     // Cloud download client: don't submit NZBs at discovery — cloud APIs
@@ -820,10 +824,13 @@ async function searchOneNewznab(indexer, config, mediaType, mediaId, proxyBaseUr
 async function searchNewznab(config, mediaType, mediaId, proxyBaseUrl, configId) {
   const indexers = getConfiguredIndexers(config);
   if (indexers.length === 0) return [];
+  // One bounded metadata lookup shared by every indexer, in parallel with searches.
+  const identityPromise = searchCache.memoize(`identity:${mediaType}:${mediaId.split(":")[0]}`,
+    () => fetchMediaTitle(mediaType, mediaId), { pickTtl: value => value ? CACHE_TTL_HIT : 10000 });
 
   const batches = await Promise.all(
     indexers.map((idx) =>
-      searchOneNewznab(idx, config, mediaType, mediaId, proxyBaseUrl, configId).catch((err) => {
+      searchOneNewznab(idx, config, mediaType, mediaId, proxyBaseUrl, configId, identityPromise).catch((err) => {
         console.error(`Indexer ${idx.type} failed: ${err.message}`);
         return [];
       }),

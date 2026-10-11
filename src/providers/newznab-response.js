@@ -48,6 +48,9 @@ export function parseNewznabResponse(body) {
       enclosure: { "@attributes": { url: text(enclosure.url), length: text(enclosure.length) || attributes.size || "" } },
       language: text(item.language) || attributes.language || "",
       subs: text(item.subs) || attributes.subs || "",
+      imdbId: text(item.imdbid) || text(item.imdb) || attributes.imdbid || attributes.imdb || "",
+      season: text(item.season) || attributes.season || "",
+      episode: text(item.episode) || text(item.ep) || attributes.episode || attributes.ep || "",
     };
   });
 }
